@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,8 +17,15 @@ from spark_cli.cli import (
     collect_secret_values,
     CONFIG_PATH,
     detect_runtime_binary,
+    clone_module_source,
+    clone_target_for_module,
     delete_secret,
     fetch_secret,
+    infer_module_name_from_url,
+    is_git_source,
+    module_is_git_managed,
+    normalize_git_url,
+    pull_module_source,
     install_module_record,
     keychain_env_for_module,
     list_stored_secrets,
@@ -480,6 +488,74 @@ class SparkCliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as error:
             collect_secret_values(Args(), [module], interactive=False)
         self.assertIn("Missing required secrets", str(error.exception))
+
+    def test_is_git_source_recognizes_common_url_shapes(self) -> None:
+        self.assertTrue(is_git_source("https://github.com/spark/memory"))
+        self.assertTrue(is_git_source("git@github.com:spark/memory.git"))
+        self.assertTrue(is_git_source("github.com/spark/memory"))
+        self.assertTrue(is_git_source("https://gitlab.com/foo/bar.git"))
+        self.assertFalse(is_git_source("C:/Users/USER/Desktop/spark-memory"))
+        self.assertFalse(is_git_source(""))
+
+    def test_normalize_git_url_adds_https_for_shorthand(self) -> None:
+        self.assertEqual(
+            normalize_git_url("github.com/spark/memory"),
+            "https://github.com/spark/memory",
+        )
+        self.assertEqual(
+            normalize_git_url("https://github.com/spark/memory"),
+            "https://github.com/spark/memory",
+        )
+
+    def test_infer_module_name_from_url_drops_git_suffix(self) -> None:
+        self.assertEqual(infer_module_name_from_url("https://github.com/spark/memory.git"), "memory")
+        self.assertEqual(infer_module_name_from_url("https://github.com/spark/memory/"), "memory")
+        self.assertEqual(infer_module_name_from_url("git@github.com:spark/memory.git"), "memory")
+
+    def test_module_is_git_managed_detects_spark_modules_dir(self) -> None:
+        from spark_cli.cli import SPARK_HOME
+        managed = SPARK_HOME / "modules" / "memory" / "source"
+        self.assertTrue(module_is_git_managed(managed))
+        self.assertFalse(module_is_git_managed(Path("C:/Users/USER/Desktop/memory")))
+
+    def test_clone_module_source_clones_and_pull_updates_from_local_bare_repo(self) -> None:
+        if not shutil.which("git"):
+            self.skipTest("git not available on PATH")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            work = tmp / "work"
+            work.mkdir()
+            subprocess.run(["git", "-C", str(work), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(work), "config", "user.email", "t@t"], check=True)
+            subprocess.run(["git", "-C", str(work), "config", "user.name", "t"], check=True)
+            (work / "spark.toml").write_text(
+                '[module]\nname = "git-demo"\nversion = "0.1.0"\nkind = "service"\nplane = "execution"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(work), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "init"], check=True)
+
+            bare = tmp / "remote.git"
+            subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+
+            clone_home = tmp / "spark-home"
+            with patch("spark_cli.cli.SPARK_HOME", clone_home):
+                cloned = clone_module_source("git-demo", str(bare))
+                self.assertTrue((cloned / ".git").exists())
+                self.assertTrue((cloned / "spark.toml").exists())
+                # Second call returns the same path without re-cloning.
+                self.assertEqual(clone_module_source("git-demo", str(bare)), cloned)
+
+                # Add a new commit upstream, verify pull surfaces it.
+                (work / "extra.txt").write_text("hello", encoding="utf-8")
+                subprocess.run(["git", "-C", str(work), "add", "extra.txt"], check=True)
+                subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "second"], check=True)
+                subprocess.run(["git", "-C", str(work), "push", "-q", str(bare), "HEAD"], check=True)
+
+                ok, _detail = pull_module_source(cloned)
+                self.assertTrue(ok)
+                self.assertTrue((cloned / "extra.txt").exists())
+                self.assertEqual(clone_target_for_module("git-demo"), clone_home / "modules" / "git-demo" / "source")
 
     def test_module_secret_env_bindings_returns_env_var_mapping(self) -> None:
         module = Module(

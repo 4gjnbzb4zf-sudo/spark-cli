@@ -141,6 +141,80 @@ def load_registry_definition() -> dict[str, Any]:
     return load_json(LOCAL_REGISTRY_PATH, {"modules": {}, "bundles": {}})
 
 
+def is_git_source(source: str) -> bool:
+    value = (source or "").strip()
+    if not value:
+        return False
+    if value.startswith(("http://", "https://", "git://", "ssh://", "git@")):
+        return True
+    if value.endswith(".git"):
+        return True
+    if value.startswith("github.com/") or value.startswith("gitlab.com/"):
+        return True
+    return False
+
+
+def normalize_git_url(source: str) -> str:
+    value = source.strip()
+    if value.startswith(("github.com/", "gitlab.com/")):
+        return f"https://{value}"
+    return value
+
+
+def infer_module_name_from_url(url: str) -> str:
+    cleaned = url.strip().removesuffix(".git").rstrip("/")
+    last = cleaned.split("/")[-1]
+    return last or "module"
+
+
+def clone_target_for_module(name: str) -> Path:
+    return SPARK_HOME / "modules" / name / "source"
+
+
+def clone_module_source(name: str, source: str) -> Path:
+    target = clone_target_for_module(name)
+    if (target / "spark.toml").exists() and (target / ".git").exists():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not (target / ".git").exists():
+        raise SystemExit(
+            f"Cannot clone {name}: {target} exists but is not a git checkout. Remove it first."
+        )
+    url = normalize_git_url(source)
+    result = subprocess.run(
+        ["git", "clone", "--depth=1", url, str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or "unknown git error"
+        raise SystemExit(f"git clone failed for {name}: {detail}")
+    return target
+
+
+def pull_module_source(path: Path) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", "-C", str(path), "pull", "--ff-only"],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0, summarize_command_output(result)
+
+
+def module_is_git_managed(module_path: Path) -> bool:
+    try:
+        return module_path.is_relative_to(SPARK_HOME / "modules")
+    except AttributeError:  # pragma: no cover - Python <3.9 fallback
+        return str(SPARK_HOME / "modules") in str(module_path)
+
+
+def remove_module_clone(name: str) -> None:
+    module_home = SPARK_HOME / "modules" / name
+    if not module_home.exists():
+        return
+    shutil.rmtree(module_home, ignore_errors=True)
+
+
 def ensure_state_dirs() -> None:
     for path in (SPARK_HOME, STATE_DIR, CONFIG_DIR, MODULE_CONFIG_DIR, LOG_DIR):
         path.mkdir(parents=True, exist_ok=True)
@@ -508,11 +582,18 @@ def discover_modules() -> dict[str, Module]:
     modules: dict[str, Module] = {}
     registry = load_registry_definition()
     for name, metadata in registry.get("modules", {}).items():
-        path = Path(str(metadata.get("source", "")))
-        manifest_path = path / "spark.toml"
-        if manifest_path.exists():
-            module = load_module(path)
+        source = str(metadata.get("source", ""))
+        clone_path = clone_target_for_module(name)
+        if (clone_path / "spark.toml").exists():
+            module = load_module(clone_path)
             modules[module.name] = module
+            continue
+        if source and not is_git_source(source):
+            path = Path(source)
+            manifest_path = path / "spark.toml"
+            if manifest_path.exists():
+                module = load_module(path)
+                modules[module.name] = module
     return modules
 
 
@@ -648,6 +729,22 @@ def cmd_list(_: argparse.Namespace) -> int:
 def resolve_install_target(target: str, modules: dict[str, Module]) -> Module:
     if target in modules:
         return modules[target]
+    registry = load_registry_definition()
+    registry_metadata = registry.get("modules", {}).get(target)
+    if registry_metadata:
+        source = str(registry_metadata.get("source", ""))
+        if is_git_source(source):
+            clone_path = clone_module_source(target, source)
+            return load_module(clone_path)
+        if source and Path(source).exists():
+            manifest_path = Path(source) / "spark.toml"
+            if manifest_path.exists():
+                return load_module(Path(source))
+            raise SystemExit(f"Registry entry {target} points at {source} but no spark.toml is there.")
+    if is_git_source(target):
+        name = infer_module_name_from_url(target)
+        clone_path = clone_module_source(name, target)
+        return load_module(clone_path)
     candidate = Path(target)
     if candidate.exists():
         manifest_path = candidate / "spark.toml"
@@ -844,8 +941,15 @@ def evaluate_module_health(module: Module) -> dict[str, Any]:
 
 
 def determine_install_source_kind(target: str, modules: dict[str, Module]) -> str:
-    if target in load_registry_definition().get("modules", {}):
+    registry = load_registry_definition()
+    registry_metadata = registry.get("modules", {}).get(target)
+    if registry_metadata:
+        source = str(registry_metadata.get("source", ""))
+        if is_git_source(source):
+            return "registry_git"
         return "registry"
+    if is_git_source(target):
+        return "git_url"
     if Path(target).exists():
         return "local_path"
     if target in modules:
@@ -1509,6 +1613,11 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 0
     print_install_summary(modules)
     for module in modules:
+        if module_is_git_managed(module.path):
+            ok, detail = pull_module_source(module.path)
+            print(f"git pull {module.name}: {'ok' if ok else 'failed'} - {detail}")
+            if not ok and not args.skip_install_commands:
+                raise SystemExit(f"Aborting update for {module.name} after git pull failure.")
         if not args.skip_install_commands:
             execute_install_commands(module)
         run_module_hook(module, "post_install")
@@ -1552,6 +1661,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         env_path = module_env_path(module)
         if env_path is not None:
             remove_managed_env_block(env_path)
+        if module_is_git_managed(module.path):
+            remove_module_clone(module.name)
         remove_module_record(module.name)
         run_module_hook(module, "post_uninstall")
         removed_names.append(module.name)
