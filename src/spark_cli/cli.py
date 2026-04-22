@@ -29,6 +29,7 @@ REGISTRY_PATH = STATE_DIR / "installed.json"
 CONFIG_PATH = STATE_DIR / "setup.json"
 PID_PATH = STATE_DIR / "pids.json"
 INSTALL_PROGRESS_PATH = STATE_DIR / "install_progress.json"
+USER_CONFIG_PATH = CONFIG_DIR / "config.json"
 SECRETS_INDEX_PATH = CONFIG_DIR / "secrets_index.json"
 SECRETS_FILE_PATH = CONFIG_DIR / "secrets.local.json"
 KEYCHAIN_SERVICE = "spark-cli"
@@ -1864,6 +1865,128 @@ def follow_log_file(path: Path) -> None:
             return
 
 
+def load_user_config() -> dict[str, Any]:
+    if not USER_CONFIG_PATH.exists():
+        return {}
+    data = load_json(USER_CONFIG_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_user_config(config: dict[str, Any]) -> None:
+    save_json(USER_CONFIG_PATH, config)
+
+
+def dotted_get(config: dict[str, Any], key: str, default: Any = None) -> Any:
+    parts = key.split(".")
+    current: Any = config
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def dotted_set(config: dict[str, Any], key: str, value: Any) -> None:
+    parts = key.split(".")
+    current = config
+    for part in parts[:-1]:
+        existing = current.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            current[part] = existing
+        current = existing
+    current[parts[-1]] = value
+
+
+def dotted_unset(config: dict[str, Any], key: str) -> bool:
+    parts = key.split(".")
+    current: Any = config
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    if isinstance(current, dict) and parts[-1] in current:
+        current.pop(parts[-1])
+        return True
+    return False
+
+
+def coerce_config_value(raw: str) -> Any:
+    """Parse a CLI-supplied value into JSON-native types where possible."""
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+
+
+def cmd_config_get(args: argparse.Namespace) -> int:
+    value = dotted_get(load_user_config(), args.key)
+    if value is None:
+        print(f"{args.key} is not set")
+        return 1
+    if isinstance(value, (dict, list)):
+        print(json.dumps(value, indent=2))
+    else:
+        print(value)
+    return 0
+
+
+def cmd_config_set(args: argparse.Namespace) -> int:
+    config = load_user_config()
+    value = coerce_config_value(args.value)
+    dotted_set(config, args.key, value)
+    save_user_config(config)
+    print(f"Set {args.key} = {json.dumps(value)}")
+    return 0
+
+
+def cmd_config_unset(args: argparse.Namespace) -> int:
+    config = load_user_config()
+    if not dotted_unset(config, args.key):
+        print(f"{args.key} was not set")
+        return 1
+    save_user_config(config)
+    print(f"Unset {args.key}")
+    return 0
+
+
+def cmd_config_list(_: argparse.Namespace) -> int:
+    config = load_user_config()
+    if not config:
+        print("No user config set.")
+        return 0
+    print(json.dumps(config, indent=2))
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    registry = load_registry_definition()
+    entries = registry.get("modules", {}) or {}
+    installed = load_json(REGISTRY_PATH, {})
+    query = (args.query or "").strip().lower()
+
+    hits: list[tuple[str, str, bool, bool]] = []
+    for name, metadata in entries.items():
+        summary = str(metadata.get("summary", ""))
+        blessed = bool(metadata.get("blessed"))
+        if query and query not in name.lower() and query not in summary.lower():
+            continue
+        hits.append((name, summary, blessed, name in installed))
+
+    if not hits:
+        print("No matching modules." if query else "Registry has no modules.")
+        return 1 if query else 0
+
+    for name, summary, blessed, installed_flag in sorted(hits):
+        badges: list[str] = []
+        badges.append("blessed" if blessed else "community")
+        if installed_flag:
+            badges.append("installed")
+        badge_text = ",".join(badges)
+        print(f"{name:<30} [{badge_text}] {summary}")
+    return 0
+
+
 def cmd_secrets_list(_: argparse.Namespace) -> int:
     index = list_stored_secrets()
     if not index:
@@ -2052,6 +2175,29 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser = subparsers.add_parser("stop", help="Stop tracked Spark processes")
     stop_parser.add_argument("target", nargs="?")
     stop_parser.set_defaults(func=cmd_stop)
+
+    search_parser = subparsers.add_parser("search", help="Search the local blessed registry for modules")
+    search_parser.add_argument("query", nargs="?", help="Filter by substring match against name or summary")
+    search_parser.set_defaults(func=cmd_search)
+
+    config_parser = subparsers.add_parser("config", help="Read or write user config at ~/.spark/config/config.json")
+    config_sub = config_parser.add_subparsers(dest="config_command", required=True)
+
+    config_get_parser = config_sub.add_parser("get", help="Print a config value by dotted key")
+    config_get_parser.add_argument("key")
+    config_get_parser.set_defaults(func=cmd_config_get)
+
+    config_set_parser = config_sub.add_parser("set", help="Set a config value; JSON-parses value if possible")
+    config_set_parser.add_argument("key")
+    config_set_parser.add_argument("value")
+    config_set_parser.set_defaults(func=cmd_config_set)
+
+    config_unset_parser = config_sub.add_parser("unset", help="Remove a config value by dotted key")
+    config_unset_parser.add_argument("key")
+    config_unset_parser.set_defaults(func=cmd_config_unset)
+
+    config_list_parser = config_sub.add_parser("list", help="Dump full user config as JSON")
+    config_list_parser.set_defaults(func=cmd_config_list)
 
     secrets_parser = subparsers.add_parser("secrets", help="Manage stored secrets (Windows Credential Manager or file fallback)")
     secrets_sub = secrets_parser.add_subparsers(dest="secrets_command", required=True)

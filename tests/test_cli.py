@@ -34,6 +34,10 @@ from spark_cli.cli import (
     module_secret_env_bindings,
     check_runtime_version_for_module,
     clear_install_progress,
+    coerce_config_value,
+    dotted_get,
+    dotted_set,
+    dotted_unset,
     describe_install_risk,
     enforce_runtime_versions,
     ensure_trust_for_install,
@@ -103,6 +107,28 @@ def make_module(name: str, capabilities: list[str]) -> Module:
 
 
 class SparkCliTests(unittest.TestCase):
+    def test_dotted_set_and_get_roundtrips_nested_paths(self) -> None:
+        config: dict = {}
+        dotted_set(config, "dashboard.port", 8765)
+        dotted_set(config, "model", "sonnet")
+        self.assertEqual(dotted_get(config, "dashboard.port"), 8765)
+        self.assertEqual(dotted_get(config, "model"), "sonnet")
+        self.assertIsNone(dotted_get(config, "missing.key"))
+        self.assertEqual(dotted_get(config, "missing.key", default="fallback"), "fallback")
+
+    def test_dotted_unset_removes_nested_key_and_reports_hit(self) -> None:
+        config = {"dashboard": {"port": 8765, "theme": "dark"}}
+        self.assertTrue(dotted_unset(config, "dashboard.port"))
+        self.assertFalse(dotted_unset(config, "dashboard.port"))
+        self.assertEqual(config, {"dashboard": {"theme": "dark"}})
+
+    def test_coerce_config_value_parses_json_primitives_but_keeps_bare_strings(self) -> None:
+        self.assertEqual(coerce_config_value("true"), True)
+        self.assertEqual(coerce_config_value("42"), 42)
+        self.assertEqual(coerce_config_value('"hello"'), "hello")
+        self.assertEqual(coerce_config_value("[1,2,3]"), [1, 2, 3])
+        self.assertEqual(coerce_config_value("sonnet"), "sonnet")
+
     def test_describe_install_risk_lists_commands_and_hooks(self) -> None:
         module = Module(
             name="thirdparty",
