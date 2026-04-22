@@ -3,12 +3,16 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from spark_cli.cli import (
     Module,
     detect_ingress_owner,
     expand_targets,
+    print_install_summary,
+    resolve_bundle_names,
     resolve_install_target,
     summarize_command_output,
     update_env_file,
@@ -91,6 +95,21 @@ class SparkCliTests(unittest.TestCase):
             )
             resolved = resolve_install_target(str(repo_path), {})
             self.assertEqual(resolved.name, "test-module")
+
+    def test_resolve_bundle_names_reads_registry_bundle(self) -> None:
+        self.assertEqual(
+            resolve_bundle_names("telegram-starter"),
+            ["spark-telegram-bot", "spark-intelligence-builder", "spawner-ui"],
+        )
+
+    def test_print_install_summary_mentions_ingress_owner(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        runtime = make_module("spark-intelligence-builder", ["spark.runtime"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            print_install_summary([gateway, runtime])
+            output = stdout.getvalue()
+        self.assertIn("Install plan:", output)
+        self.assertIn("Telegram ingress owner: spark-telegram-bot", output)
 
 
 if __name__ == "__main__":

@@ -134,6 +134,15 @@ def resolve_bundle(bundle_name: str, modules: dict[str, Module]) -> list[Module]
     return [modules[name] for name in names]
 
 
+def resolve_bundle_names(bundle_name: str) -> list[str]:
+    registry = load_registry_definition()
+    bundle = registry.get("bundles", {}).get(bundle_name, {})
+    names = bundle.get("modules")
+    if not names:
+        raise SystemExit(f"Unknown bundle: {bundle_name}")
+    return [str(name) for name in names]
+
+
 def expand_targets(target: str | None, modules: dict[str, Module], include_all: bool = False) -> list[str]:
     if target is None:
         return list(modules.keys()) if include_all else []
@@ -226,14 +235,35 @@ def install_module_record(module: Module) -> None:
     save_json(REGISTRY_PATH, installed)
 
 
+def print_install_summary(modules: list[Module]) -> None:
+    print("Install plan:")
+    for module in modules:
+        print(f"- {module.name} ({module.kind}, {module.plane})")
+    ingress_owners = [module.name for module in modules if "telegram.ingress" in module.capabilities]
+    if ingress_owners:
+        print(f"Telegram ingress owner: {', '.join(ingress_owners)}")
+
+
+def install_modules(modules: list[Module]) -> None:
+    print_install_summary(modules)
+    for module in modules:
+        install_module_record(module)
+        print(f"Installed {module.name} from {module.path}")
+        if "telegram.ingress" in module.capabilities:
+            print("This module declares telegram.ingress and should be the only live Telegram token owner.")
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     modules = discover_modules()
+    registry = load_registry_definition()
+    if args.target in registry.get("bundles", {}):
+        bundle_modules = [modules[name] for name in resolve_bundle_names(args.target)]
+        detect_ingress_owner(bundle_modules)
+        install_modules(bundle_modules)
+        return 0
     module = resolve_install_target(args.target, modules)
-    install_module_record(module)
-    print(f"Installed {module.name} from {module.path}")
-    if "telegram.ingress" in module.capabilities:
-        print("This module declares telegram.ingress and should be the only live Telegram token owner.")
+    install_modules([module])
     return 0
 
 
