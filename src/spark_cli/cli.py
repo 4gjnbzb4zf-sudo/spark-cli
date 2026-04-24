@@ -731,6 +731,10 @@ def generated_module_env_path(module: Module) -> Path:
     return MODULE_CONFIG_DIR / f"{module.name}.env"
 
 
+def spark_builder_home() -> Path:
+    return STATE_DIR / "spark-intelligence"
+
+
 def write_generated_env(path: Path, values: dict[str, str]) -> None:
     lines = [f"{key}={value}" for key, value in values.items()]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -861,6 +865,9 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     gateway = modules_by_name["spark-telegram-bot"]
     spawner = modules_by_name["spawner-ui"]
     builder = modules_by_name["spark-intelligence-builder"]
+    researcher = modules_by_name.get("spark-researcher")
+    memory = modules_by_name.get("domain-chip-memory")
+    builder_home = spark_builder_home()
     _, llm_env = build_llm_env(args, secret_values)
     relay_secret = secret_values.get("telegram.relay_secret") or py_secrets.token_urlsafe(32)
 
@@ -868,6 +875,8 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "BOT_TOKEN": secret_values.get("telegram.bot_token", ""),
         "ADMIN_TELEGRAM_IDS": secret_values.get("telegram.admin_ids", ""),
         "SPARK_BUILDER_REPO": str(builder.path),
+        "SPARK_BUILDER_HOME": str(builder_home),
+        "SPARK_BUILDER_PYTHON": str(Path(sys.executable)),
         "SPARK_BUILDER_BRIDGE_MODE": "auto",
         "SPAWNER_UI_URL": args.spawner_ui_url or "http://127.0.0.1:5173",
         "TELEGRAM_GATEWAY_MODE": "polling",
@@ -885,11 +894,78 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     spawner_env.update({f"SPARK_{key}": value for key, value in llm_metadata_env.items()})
     spawner_env["TELEGRAM_RELAY_SECRET"] = relay_secret
 
+    builder_env = {
+        "SPARK_INTELLIGENCE_HOME": str(builder_home),
+        **{f"SPARK_{key}": value for key, value in llm_metadata_env.items()},
+    }
+    if researcher is not None:
+        builder_env["SPARK_RESEARCHER_ROOT"] = str(researcher.path)
+    if memory is not None:
+        builder_env["SPARK_DOMAIN_CHIP_MEMORY_ROOT"] = str(memory.path)
+
     return {
         gateway.name: gateway_env,
         spawner.name: spawner_env,
-        builder.name: {f"SPARK_{key}": value for key, value in llm_metadata_env.items()},
+        builder.name: builder_env,
     }
+
+
+def initialize_builder_runtime_home(modules_by_name: dict[str, Module]) -> list[str]:
+    notes: list[str] = []
+    builder = modules_by_name.get("spark-intelligence-builder")
+    if builder is None:
+        return notes
+
+    builder_home = spark_builder_home()
+    builder_home.mkdir(parents=True, exist_ok=True)
+    notes.append(f"prepared Builder home at {builder_home}")
+
+    builder_src = builder.path / "src"
+    if not (builder_src / "spark_intelligence").exists():
+        notes.append("skipped Builder runtime bootstrap because spark_intelligence source is not present")
+        return notes
+
+    inserted = False
+    builder_src_value = str(builder_src)
+    if builder_src_value not in sys.path:
+        sys.path.insert(0, builder_src_value)
+        inserted = True
+    try:
+        from spark_intelligence.attachments import add_attachment_root, activate_chip, sync_attachment_snapshot
+        from spark_intelligence.config.loader import ConfigManager
+        from spark_intelligence.state.db import StateDB
+
+        config_manager = ConfigManager.from_home(str(builder_home))
+        config_manager.bootstrap()
+        state_db = StateDB(config_manager.paths.state_db)
+        state_db.initialize()
+
+        researcher = modules_by_name.get("spark-researcher")
+        if researcher is not None:
+            config_manager.set_path("spark.researcher.runtime_root", str(researcher.path))
+            researcher_config = researcher.path / "spark-researcher.project.json"
+            if researcher_config.exists():
+                config_manager.set_path("spark.researcher.config_path", str(researcher_config))
+            notes.append(f"connected spark-researcher at {researcher.path}")
+
+        memory = modules_by_name.get("domain-chip-memory")
+        if memory is not None:
+            add_attachment_root(config_manager, target="chips", root=str(memory.path))
+            config_manager.set_path("spark.memory.enabled", True)
+            config_manager.set_path("spark.memory.shadow_mode", False)
+            config_manager.set_path("spark.memory.sdk_module", "domain_chip_memory")
+            activate_chip(config_manager, chip_key="domain-chip-memory")
+            sync_attachment_snapshot(config_manager=config_manager, state_db=state_db)
+            notes.append(f"activated domain-chip-memory at {memory.path}")
+    except Exception as exc:  # pragma: no cover - defensive fallback for partial installs
+        notes.append(f"Builder runtime bootstrap skipped: {exc}")
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(builder_src_value)
+            except ValueError:
+                pass
+    return notes
 
 
 def discover_modules() -> dict[str, Module]:
@@ -1683,6 +1759,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "configured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "secret_keys": sorted(secret_values.keys()),
         "llm": llm_setup_state(llm_provider, llm_env),
+        "builder_home": str(spark_builder_home()),
     }
     save_json(CONFIG_PATH, setup_state)
     resume = getattr(args, "resume", False)
@@ -1701,6 +1778,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         )
         clear_install_progress(module.name)
 
+    builder_notes = initialize_builder_runtime_home(modules)
     keychain_report = persist_keychain_secrets(bundle, secret_values)
     generated_envs = build_module_envs(args, modules, secret_values)
     for module in bundle:
@@ -1716,6 +1794,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print(f"Telegram ingress owner: {ingress_owner.name}")
     print("Bot token routed only to spark-telegram-bot.")
     print(f"Generated module config dir: {MODULE_CONFIG_DIR}")
+    for note in builder_notes:
+        print(f"Builder runtime: {note}")
     if keychain_report:
         for secret_id, backend in sorted(keychain_report.items()):
             print(f"Secret {secret_id} -> {backend}")

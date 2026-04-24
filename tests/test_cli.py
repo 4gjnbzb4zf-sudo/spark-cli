@@ -761,6 +761,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("spark start spark-telegram-bot", setup_output)
             self.assertIn("/diagnose", setup_output)
             self.assertIn("Need a bot token? Open @BotFather", setup_output)
+            self.assertIn("Builder runtime: prepared Builder home", setup_output)
 
             expected = [
                 "spark-researcher",
@@ -786,11 +787,17 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(setup_state["llm"]["provider"], "zai")
             self.assertEqual(setup_state["llm"]["model"], "glm-5.1")
             self.assertTrue(setup_state["llm"]["api_key_configured"])
+            expected_builder_home = state_dir / "spark-intelligence"
+            self.assertEqual(setup_state["builder_home"], str(expected_builder_home))
+            self.assertTrue(expected_builder_home.exists())
 
             gateway_env = (module_config_dir / "spark-telegram-bot.env").read_text(encoding="utf-8")
             spawner_env = (module_config_dir / "spawner-ui.env").read_text(encoding="utf-8")
+            builder_env = (module_config_dir / "spark-intelligence-builder.env").read_text(encoding="utf-8")
             self.assertNotIn("BOT_TOKEN=123456:test-token", gateway_env)
             self.assertIn("ADMIN_TELEGRAM_IDS=111,222", gateway_env)
+            self.assertIn(f"SPARK_BUILDER_HOME={expected_builder_home}", gateway_env)
+            self.assertIn(f"SPARK_BUILDER_PYTHON={Path(sys.executable)}", gateway_env)
             self.assertIn("SPAWNER_UI_URL=http://127.0.0.1:5173", gateway_env)
             self.assertIn("LLM_PROVIDER=zai", gateway_env)
             self.assertNotIn("ZAI_API_KEY=zai-test-key", gateway_env)
@@ -802,6 +809,9 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("MISSION_CONTROL_WEBHOOK_URLS=http://127.0.0.1:8788/spawner-events", spawner_env)
             self.assertIn("TELEGRAM_RELAY_SECRET=", spawner_env)
             self.assertNotIn("TELEGRAM_RELAY_SECRET=", gateway_env)
+            self.assertIn(f"SPARK_INTELLIGENCE_HOME={expected_builder_home}", builder_env)
+            self.assertIn(f"SPARK_RESEARCHER_ROOT={fixture_root / 'spark-researcher'}", builder_env)
+            self.assertIn(f"SPARK_DOMAIN_CHIP_MEMORY_ROOT={fixture_root / 'domain-chip-memory'}", builder_env)
             secrets_index = load_json(config_dir / "secrets_index.json", {})
             secrets_file = load_json(config_dir / "secrets.local.json", {})
             self.assertEqual(secrets_index["telegram.relay_secret"], "file")
@@ -977,6 +987,8 @@ class SparkCliTests(unittest.TestCase):
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
         builder = make_module("spark-intelligence-builder", ["spark.runtime"])
         spawner = make_module("spawner-ui", ["mission.execution"])
+        researcher = make_module("spark-researcher", ["spark.researcher"])
+        memory = make_module("domain-chip-memory", ["spark.memory.substrate"])
 
         class Args:
             spawner_ui_url = "http://127.0.0.1:5173"
@@ -988,6 +1000,8 @@ class SparkCliTests(unittest.TestCase):
                 gateway.name: gateway,
                 builder.name: builder,
                 spawner.name: spawner,
+                researcher.name: researcher,
+                memory.name: memory,
             },
             {
                 "telegram.bot_token": "abc",
@@ -997,6 +1011,11 @@ class SparkCliTests(unittest.TestCase):
         )
         self.assertEqual(envs["spark-telegram-bot"]["BOT_TOKEN"], "abc")
         self.assertNotIn("BOT_TOKEN", envs["spawner-ui"])
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_HOME"], str(REGISTRY_PATH.parent / "spark-intelligence"))
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_PYTHON"], str(Path(sys.executable)))
+        self.assertEqual(envs["spark-intelligence-builder"]["SPARK_INTELLIGENCE_HOME"], str(REGISTRY_PATH.parent / "spark-intelligence"))
+        self.assertEqual(envs["spark-intelligence-builder"]["SPARK_RESEARCHER_ROOT"], str(researcher.path))
+        self.assertEqual(envs["spark-intelligence-builder"]["SPARK_DOMAIN_CHIP_MEMORY_ROOT"], str(memory.path))
         self.assertEqual(
             envs["spark-telegram-bot"]["TELEGRAM_RELAY_SECRET"],
             envs["spawner-ui"]["TELEGRAM_RELAY_SECRET"],
