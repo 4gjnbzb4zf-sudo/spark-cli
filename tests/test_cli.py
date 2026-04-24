@@ -759,6 +759,31 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(envs["spark-telegram-bot"]["BOT_TOKEN"], "abc")
         self.assertNotIn("BOT_TOKEN", envs["spawner-ui"])
 
+    def test_build_module_envs_defaults_missing_spawner_ui_url(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = None
+            telegram_gateway_mode = "auto"
+            telegram_webhook_url = None
+
+        envs = build_module_envs(
+            Args(),
+            {
+                gateway.name: gateway,
+                builder.name: builder,
+                spawner.name: spawner,
+            },
+            {
+                "telegram.bot_token": "abc",
+                "telegram.admin_ids": "123",
+            },
+        )
+        self.assertEqual(envs["spark-telegram-bot"]["SPAWNER_UI_URL"], "http://127.0.0.1:5173")
+        self.assertEqual(envs["spawner-ui"]["MISSION_CONTROL_WEBHOOK_URLS"], "http://127.0.0.1:8788/spawner-events")
+
     def test_pid_is_running_detects_current_process(self) -> None:
         self.assertTrue(pid_is_running(os.getpid()))
 

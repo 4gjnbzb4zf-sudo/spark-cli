@@ -672,7 +672,7 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "ADMIN_TELEGRAM_IDS": secret_values.get("telegram.admin_ids", ""),
         "SPARK_BUILDER_REPO": str(builder.path),
         "SPARK_BUILDER_BRIDGE_MODE": "auto",
-        "SPAWNER_UI_URL": args.spawner_ui_url,
+        "SPAWNER_UI_URL": args.spawner_ui_url or "http://127.0.0.1:5173",
         "TELEGRAM_GATEWAY_MODE": args.telegram_gateway_mode,
     }
     if secret_values.get("telegram.webhook_secret"):
@@ -680,7 +680,7 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     if args.telegram_webhook_url:
         gateway_env["TELEGRAM_WEBHOOK_URL"] = args.telegram_webhook_url
 
-    relay_base = args.spawner_ui_url
+    relay_base = args.spawner_ui_url or "http://127.0.0.1:5173"
     if relay_base.endswith(":5173"):
         relay_base = relay_base[:-4] + "8788"
     spawner_env = {
