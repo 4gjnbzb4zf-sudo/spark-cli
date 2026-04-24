@@ -28,6 +28,36 @@ That default setup installs:
 
 If another `spark` binary is already on your PATH, use `spark-local`. The package exposes both names to the same entrypoint.
 
+## What Spark CLI Does
+
+Spark CLI is the installer and operator shell for the Spark ecosystem. It gives a normal user one path instead of five separate repo installs.
+
+```mermaid
+flowchart TD
+  Start["User runs spark setup"] --> Registry["Resolve starter bundle"]
+  Registry --> Clone["Clone core repos"]
+  Clone --> Install["Install each module runtime"]
+  Install --> Secrets["Store secrets safely"]
+  Secrets --> Env["Write per-module env files"]
+  Env --> Health["Run healthchecks"]
+  Health --> Run["User starts Telegram bot and Spawner"]
+```
+
+The CLI owns:
+
+- module discovery and install records
+- safe secret storage
+- generated module env files
+- managed Python/Node runtime shims where needed
+- healthchecks, logs, start/stop, and update flows
+
+The CLI does not own:
+
+- Telegram bot behavior
+- Builder memory policy
+- Spawner mission execution
+- domain-chip benchmark logic
+
 ## Requirements
 
 | Dependency | Why |
@@ -90,13 +120,14 @@ bash ./install.sh \
 
 The runtime shape is:
 
-```text
-Telegram user
-  -> spark-telegram-bot
-  -> spark-intelligence-builder for memory, researcher, identity, and LLM routing
-  -> domain-chip-memory when Builder activates the default memory chip
-  -> spark-researcher for research, advisory, and chip-authoring flows
-  -> spawner-ui for missions, project creation, and execution
+```mermaid
+flowchart LR
+  User["Telegram user"] --> Bot["spark-telegram-bot"]
+  Bot --> Builder["spark-intelligence-builder"]
+  Builder --> Memory["domain-chip-memory"]
+  Builder --> Researcher["spark-researcher"]
+  Bot --> Spawner["spawner-ui"]
+  Spawner --> Bot
 ```
 
 Setup writes the shared env that makes the pieces talk to each other:
@@ -109,6 +140,37 @@ Setup writes the shared env that makes the pieces talk to each other:
 - Cloud API keys are stored through Spark's secret backend.
 
 The older dashboard/resonance API is intentionally not part of the launch starter path. Fresh installs should not require `SPARK_API_URL`, `SPARK_DASHBOARD_URL`, or a local service on port `8787`.
+
+## After Install
+
+For a fresh user, the intended path is:
+
+```bash
+spark guide
+spark status
+spark start spawner-ui
+spark start spark-telegram-bot
+```
+
+Then open Telegram and talk to the bot configured during `spark setup`.
+
+Useful Telegram checks:
+
+- `/start` shows the available commands.
+- `/myid` prints the numeric Telegram ID to put in `ADMIN_TELEGRAM_IDS`.
+- `/diagnose` checks LLM/provider paths.
+- `/run <goal>` sends a mission to Spawner UI.
+
+## Agent Operating Guide
+
+If you are an LLM agent installing Spark for a user:
+
+1. Prefer the official site/script path the user gives you, or clone `spark-cli` directly if developing locally.
+2. Run `spark setup` first; do not install the five core repos one by one unless debugging.
+3. Use `spark status --json` before declaring the install healthy.
+4. Never print or commit bot tokens, provider API keys, `.env`, `.env.*`, or `~/.spark/config/secrets.local.json`.
+5. If a module fails healthcheck, read `spark status` repair hints before editing code.
+6. Do not add the deferred dashboard/port `8787` path back into launch onboarding.
 
 ## Commands
 
@@ -159,7 +221,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-Current focused suite: `100` tests in `tests/test_cli.py`.
+Current focused suite lives in `tests/test_cli.py`.
 
 ## More Docs
 
