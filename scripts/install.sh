@@ -295,7 +295,7 @@ Spark command:
   $SPARK_PREFIX/bin/spark --help
   $SPARK_PREFIX/bin/spark guide
 
-To use `spark` by name in this terminal:
+To use \`spark\` by name in this terminal:
   source "$SPARK_PREFIX/env"
 
 To make that permanent, add this line to your shell profile:

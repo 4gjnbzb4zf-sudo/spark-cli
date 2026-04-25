@@ -1985,6 +1985,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn('"$SPARK_PREFIX/bin/spark" autostart install "$SPARK_BUNDLE" --now', script)
         self.assertIn('local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE")', script)
         self.assertNotIn('"${setup_words[@]}" "${extra_setup_args[@]}"', script)
+        self.assertIn(r"To use \`spark\` by name in this terminal:", script)
         self.assertIn('source "$SPARK_PREFIX/env"', script)
         self.assertIn("spark_cli.cli", script)
 
