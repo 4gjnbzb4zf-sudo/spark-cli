@@ -1715,6 +1715,26 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("exited with code 1", warning)
         self.assertIn("spark logs spawner-ui --lines 80", warning)
 
+    def test_format_start_warning_does_not_repeat_embedded_exit_detail(self) -> None:
+        module = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={"module": {"name": "spark-telegram-bot", "version": "0.1.0", "kind": "service", "plane": "ingress"}},
+        )
+
+        class ExitedProcess:
+            def poll(self) -> int:
+                return 1
+
+        warning = format_start_warning(
+            module,
+            "Telegram health: FAILED - bad token; process exited with code 1",
+            ExitedProcess(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(warning.count("process exited with code 1"), 1)
+        self.assertIn("spark logs spark-telegram-bot --lines 80", warning)
+
     def test_start_module_allows_boot_warning_when_process_keeps_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             module = Module(
