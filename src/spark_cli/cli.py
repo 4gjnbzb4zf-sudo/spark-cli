@@ -2279,6 +2279,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_restart(args: argparse.Namespace) -> int:
+    stop_code = cmd_stop(args)
+    start_code = cmd_start(args)
+    return start_code or stop_code
+
+
 def spark_invocation_args() -> list[str]:
     wrapper_name = "spark.cmd" if os.name == "nt" else "spark"
     spark_home_wrapper = SPARK_HOME / "bin" / wrapper_name
@@ -3227,6 +3233,10 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser = subparsers.add_parser("stop", help="Stop tracked Spark processes")
     stop_parser.add_argument("target", nargs="?")
     stop_parser.set_defaults(func=cmd_stop)
+
+    restart_parser = subparsers.add_parser("restart", help="Restart startable modules")
+    restart_parser.add_argument("target", nargs="?")
+    restart_parser.set_defaults(func=cmd_restart)
 
     autostart_parser = subparsers.add_parser("autostart", help="Start Spark automatically when this computer logs in")
     autostart_subparsers = autostart_parser.add_subparsers(dest="autostart_command", required=True)

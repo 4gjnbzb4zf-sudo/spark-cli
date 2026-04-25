@@ -636,6 +636,10 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(args.target, "telegram-starter")
         self.assertTrue(args.now)
 
+    def test_restart_accepts_starter_bundle_target(self) -> None:
+        args = build_parser().parse_args(["restart", "telegram-starter"])
+        self.assertEqual(args.target, "telegram-starter")
+
     def test_render_systemd_autostart_unit_starts_and_stops_starter_bundle(self) -> None:
         unit = render_systemd_autostart_unit(
             target="telegram-starter",
