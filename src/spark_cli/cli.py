@@ -3048,6 +3048,8 @@ def format_start_warning(module: Module, detail: str, process: subprocess.Popen[
     log_hint = f"Run `spark logs {module.name} --lines 80` for startup logs."
     exit_code = process.poll()
     if exit_code is not None:
+        if detail.startswith("process exited with code"):
+            return f"{detail}. {log_hint}"
         return f"{detail}. The process exited with code {exit_code}. {log_hint}"
     return f"{detail}. The process is still running and may still be booting. {log_hint}"
 
