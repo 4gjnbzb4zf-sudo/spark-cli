@@ -2103,7 +2103,8 @@ def wait_for_ready_check(module: Module) -> tuple[bool, str]:
     if not ready_check:
         return True, "no ready check declared"
 
-    deadline = time.time() + ready_timeout_seconds(module)
+    timeout_seconds = ready_timeout_seconds(module)
+    deadline = time.time() + timeout_seconds
     last_error = "ready check did not pass before timeout"
     while time.time() < deadline:
         if ready_check.startswith(("http://", "https://")):
@@ -2120,7 +2121,17 @@ def wait_for_ready_check(module: Module) -> tuple[bool, str]:
                 return True, summarize_command_output(result)
             last_error = summarize_command_output(result)
         time.sleep(1)
-    return False, last_error
+    if ready_check.startswith(("http://", "https://")):
+        return False, f"{ready_check} did not become ready within {timeout_seconds}s (last error: {last_error})"
+    return False, f"ready check did not pass within {timeout_seconds}s: {last_error}"
+
+
+def format_start_warning(module: Module, detail: str, process: subprocess.Popen[Any]) -> str:
+    log_hint = f"Run `spark logs {module.name} --lines 80` for startup logs."
+    exit_code = process.poll()
+    if exit_code is not None:
+        return f"{detail}. The process exited with code {exit_code}. {log_hint}"
+    return f"{detail}. The process is still running and may still be booting. {log_hint}"
 
 
 def start_module(module: Module) -> bool:
@@ -2172,7 +2183,7 @@ def start_module(module: Module) -> bool:
     if ready:
         print(f"Ready {module.name}: {detail}")
     else:
-        print(f"Start warning for {module.name}: {detail}")
+        print(f"Start warning for {module.name}: {format_start_warning(module, detail, process)}")
     return ready
 
 

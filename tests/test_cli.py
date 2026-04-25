@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -86,6 +87,7 @@ from spark_cli.cli import (
     remove_managed_env_block,
     pid_is_running,
     print_install_summary,
+    format_start_warning,
     ready_timeout_seconds,
     read_generated_env,
     required_runtimes_for_modules,
@@ -1118,6 +1120,56 @@ class SparkCliTests(unittest.TestCase):
             ready, detail = wait_for_ready_check(module)
             self.assertTrue(ready)
             self.assertEqual(detail, "ready")
+
+    def test_wait_for_ready_check_describes_http_timeout(self) -> None:
+        module = Module(
+            name="http-target",
+            path=Path("C:/tmp/http-target"),
+            manifest={
+                "module": {"name": "http-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "healthcheck": {"timeout_seconds": 1},
+            },
+        )
+
+        with patch("spark_cli.cli.urllib.request.urlopen", side_effect=urllib.error.URLError(ConnectionRefusedError())), \
+             patch("spark_cli.cli.time.time", side_effect=[100.0, 100.5, 101.5]), \
+             patch("spark_cli.cli.time.sleep", return_value=None):
+            ready, detail = wait_for_ready_check(module)
+
+        self.assertFalse(ready)
+        self.assertIn("http://127.0.0.1:5173/api/providers did not become ready within 1s", detail)
+        self.assertIn("last error:", detail)
+
+    def test_format_start_warning_mentions_running_process_and_logs(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={"module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"}},
+        )
+
+        class RunningProcess:
+            def poll(self) -> None:
+                return None
+
+        warning = format_start_warning(module, "not ready", RunningProcess())  # type: ignore[arg-type]
+        self.assertIn("still running and may still be booting", warning)
+        self.assertIn("spark logs spawner-ui --lines 80", warning)
+
+    def test_format_start_warning_mentions_exited_process_and_logs(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={"module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"}},
+        )
+
+        class ExitedProcess:
+            def poll(self) -> int:
+                return 1
+
+        warning = format_start_warning(module, "not ready", ExitedProcess())  # type: ignore[arg-type]
+        self.assertIn("exited with code 1", warning)
+        self.assertIn("spark logs spawner-ui --lines 80", warning)
 
     def test_required_runtimes_for_modules_dedups_across_bundle(self) -> None:
         python_module = Module(
