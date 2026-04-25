@@ -2110,7 +2110,7 @@ class SparkCliTests(unittest.TestCase):
             env["SPARK_HOME"] = tmp_dir
             result = subprocess.run(
                 [
-                    os.environ.get("PYTHON", "python"),
+                    os.environ.get("PYTHON", sys.executable),
                     "-c",
                     "import spark_cli.cli as c; print(c.SPARK_HOME)",
                 ],
