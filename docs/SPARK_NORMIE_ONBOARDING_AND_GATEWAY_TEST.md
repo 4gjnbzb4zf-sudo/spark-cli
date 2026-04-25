@@ -30,14 +30,10 @@ The CLI clones or discovers these modules, validates each `spark.toml`, checks c
 iwr https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.ps1 -OutFile .\install.ps1
 Get-Content .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -SetupArg --bot-token `
-  -SetupArg "<BOTFATHER_TOKEN>" `
-  -SetupArg --admin-telegram-ids `
-  -SetupArg "<YOUR_TELEGRAM_NUMERIC_ID>" `
-  -SetupArg --llm-provider `
-  -SetupArg zai `
-  -SetupArg --zai-api-key `
-  -SetupArg "<ZAI_API_KEY>"
+  -BotToken "<BOTFATHER_TOKEN>" `
+  -AdminTelegramIds "<YOUR_TELEGRAM_NUMERIC_ID>" `
+  -LlmProvider zai `
+  -ZaiApiKey "<ZAI_API_KEY>"
 ```
 
 ### macOS, Linux, WSL
@@ -48,17 +44,13 @@ The shell installer auto-detects Apple Silicon, Intel Mac, Linux x64, Linux arm6
 curl -fsSLO https://raw.githubusercontent.com/vibeforge1111/spark-cli/master/scripts/install.sh
 less install.sh
 bash ./install.sh \
-  --setup-arg --bot-token \
-  --setup-arg "<BOTFATHER_TOKEN>" \
-  --setup-arg --admin-telegram-ids \
-  --setup-arg "<YOUR_TELEGRAM_NUMERIC_ID>" \
-  --setup-arg --llm-provider \
-  --setup-arg zai \
-  --setup-arg --zai-api-key \
-  --setup-arg "<ZAI_API_KEY>"
+  --bot-token "<BOTFATHER_TOKEN>" \
+  --admin-telegram-ids "<YOUR_TELEGRAM_NUMERIC_ID>" \
+  --llm-provider zai \
+  --zai-api-key "<ZAI_API_KEY>"
 ```
 
-The launch docs intentionally avoid `curl | bash` and `iwr | iex`. The installers also download a managed Node runtime and verify the archive against Node's published `SHASUMS256.txt` before extraction.
+The launch docs intentionally avoid `curl | bash` and `iwr | iex`. If a good Node/npm is already installed, the installer uses it to avoid a slow first-run download. Otherwise it downloads a managed Node runtime and verifies the archive against Node's published `SHASUMS256.txt` before extraction.
 
 ## BotFather and Telegram Owner Setup
 

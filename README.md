@@ -86,9 +86,20 @@ Get-Content .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+Windows scripted setup can pass the normal onboarding values directly to the installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 `
+  -NonInteractiveSetup `
+  -BotToken $env:TELEGRAM_BOT_TOKEN `
+  -AdminTelegramIds $env:TELEGRAM_ADMIN_IDS `
+  -LlmProvider openai
+```
+
 The Windows installer adds `~\.spark\bin` to your user PATH so a new CMD or PowerShell can run `spark status` directly. If the current terminal still finds another `spark.exe`, reopen it or use the direct wrapper path: `%USERPROFILE%\.spark\bin\spark.cmd status`.
 
 The launch docs intentionally avoid piping remote scripts directly into a shell. The installer also verifies the managed Node archive against Node's published `SHASUMS256.txt` before extraction.
+If a good Node/npm is already installed, the installer uses it to avoid a slow first-run download; pass `-ManagedNode` on Windows or `--managed-node` on macOS/Linux to force Spark's verified managed Node runtime.
 
 After setup, the macOS/Linux/WSL installer runs `spark autostart install --now` by default. That starts the Telegram starter stack immediately and installs the operating-system login hook so Spark comes back after the computer logs in. Use `--no-autostart` or `SPARK_AUTOSTART=0` if you only want to install/configure and start Spark manually later.
 
@@ -96,11 +107,9 @@ For scripted setup:
 
 ```bash
 bash ./install.sh \
-  --setup-arg --non-interactive \
-  --setup-arg --bot-token \
-  --setup-arg "$TELEGRAM_BOT_TOKEN" \
-  --setup-arg --admin-telegram-ids \
-  --setup-arg "$TELEGRAM_ADMIN_IDS"
+  --non-interactive-setup \
+  --bot-token "$TELEGRAM_BOT_TOKEN" \
+  --admin-telegram-ids "$TELEGRAM_ADMIN_IDS"
 ```
 
 That command installs and wires the starter stack, but it intentionally does not invent an LLM provider. If no provider is chosen, `spark status` and `spark fix telegram` report the LLM roles as not configured instead of silently falling back to a local model.
@@ -111,13 +120,10 @@ Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
 
 ```bash
 bash ./install.sh \
-  --setup-arg --non-interactive \
-  --setup-arg --bot-token \
-  --setup-arg "$TELEGRAM_BOT_TOKEN" \
-  --setup-arg --admin-telegram-ids \
-  --setup-arg "$TELEGRAM_ADMIN_IDS" \
-  --setup-arg --llm-provider \
-  --setup-arg openai
+  --non-interactive-setup \
+  --bot-token "$TELEGRAM_BOT_TOKEN" \
+  --admin-telegram-ids "$TELEGRAM_ADMIN_IDS" \
+  --llm-provider openai
 ```
 
 Provider options:
