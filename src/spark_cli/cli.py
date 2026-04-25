@@ -842,6 +842,12 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
         "model_default": "kimi-k2.5:cloud",
         "bot_provider": "ollama",
     },
+    "codex": {
+        "model_arg": "codex_model",
+        "model_env": "CODEX_MODEL",
+        "model_default": "gpt-5.5",
+        "bot_provider": "codex",
+    },
 }
 
 LLM_ROLES = ("chat", "builder", "memory", "mission")
@@ -871,6 +877,8 @@ def provider_auth_mode(provider: str, env: dict[str, str]) -> str:
     api_key_env = spec.get("api_key_env")
     if api_key_env and env.get(api_key_env):
         return "api_key"
+    if provider == "codex" and detect_codex_cli()["present"]:
+        return "codex_oauth"
     if provider == "openai" and detect_codex_cli()["present"]:
         return "codex_oauth"
     if provider == "anthropic" and detect_claude_code()["present"]:
@@ -898,9 +906,15 @@ def build_llm_env(args: argparse.Namespace, secret_values: dict[str, str]) -> tu
 
     for provider_name in sorted(set(roles.values())):
         provider_spec = LLM_PROVIDER_ENV[provider_name]
-        base_url = getattr(args, provider_spec["base_url_arg"], None) or provider_spec["base_url_default"]
+        if provider_name in {"codex", "openai"}:
+            codex = detect_codex_cli()
+            if codex["present"]:
+                env["CODEX_PATH"] = str(codex["path"])
+        base_url_arg = provider_spec.get("base_url_arg")
+        if base_url_arg:
+            base_url = getattr(args, base_url_arg, None) or provider_spec["base_url_default"]
+            env[provider_spec["base_url_env"]] = str(base_url)
         model = getattr(args, provider_spec["model_arg"], None) or provider_spec["model_default"]
-        env[provider_spec["base_url_env"]] = str(base_url)
         env[provider_spec["model_env"]] = str(model)
 
     for role, role_provider in roles.items():
@@ -909,7 +923,8 @@ def build_llm_env(args: argparse.Namespace, secret_values: dict[str, str]) -> tu
         env[f"{role_prefix}_PROVIDER"] = role_provider
         env[f"{role_prefix}_BOT_PROVIDER"] = role_spec["bot_provider"]
         env[f"{role_prefix}_MODEL"] = env.get(role_spec["model_env"], role_spec["model_default"])
-        env[f"{role_prefix}_BASE_URL"] = env.get(role_spec["base_url_env"], role_spec["base_url_default"])
+        if role_spec.get("base_url_env"):
+            env[f"{role_prefix}_BASE_URL"] = env.get(role_spec["base_url_env"], role_spec["base_url_default"])
         env[f"{role_prefix}_AUTH_MODE"] = provider_auth_mode(role_provider, env)
     return provider, env
 
@@ -946,7 +961,7 @@ def llm_setup_state(provider: str, env: dict[str, str]) -> dict[str, Any]:
     return {
         "provider": provider,
         "bot_default_provider": spec["bot_provider"],
-        "base_url_env": spec["base_url_env"],
+        "base_url_env": spec.get("base_url_env"),
         "model_env": spec["model_env"],
         "model": env.get(spec["model_env"], ""),
         "api_key_env": api_key_env,
@@ -987,6 +1002,13 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     }
     llm_metadata_env = spark_prefixed_metadata_env(llm_env)
     spawner_env.update(llm_metadata_env)
+    mission_provider = llm_env.get("SPARK_MISSION_LLM_BOT_PROVIDER") or llm_env.get("BOT_DEFAULT_PROVIDER")
+    if mission_provider:
+        spawner_env["DEFAULT_MISSION_PROVIDER"] = mission_provider
+    if mission_provider == "codex":
+        spawner_env["SPAWNER_PRD_AUTO_PROVIDER"] = "codex"
+        if llm_env.get("CODEX_PATH"):
+            spawner_env["CODEX_PATH"] = llm_env["CODEX_PATH"]
     spawner_env["TELEGRAM_RELAY_SECRET"] = relay_secret
 
     builder_env = {
@@ -3187,6 +3209,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 {"role": "mission", "use": "Spawner missions, coding/build work, and execution tasks."},
             ],
             "llm_examples": [
+                "spark setup --llm-provider codex --codex-model gpt-5.5",
                 "spark setup --llm-provider openai",
                 "spark setup --llm-provider openai --openai-api-key <OPENAI_API_KEY> --openai-model gpt-5.5",
                 "spark setup --llm-provider anthropic",
@@ -3329,6 +3352,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--anthropic-model", default="claude-sonnet-4.5")
     setup_parser.add_argument("--ollama-url", default="http://localhost:11434")
     setup_parser.add_argument("--ollama-model", default="kimi-k2.5:cloud")
+    setup_parser.add_argument("--codex-model", default="gpt-5.5")
     setup_parser.set_defaults(func=cmd_setup)
 
     status_parser = subparsers.add_parser("status", help="Run module healthchecks")

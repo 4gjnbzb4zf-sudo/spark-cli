@@ -1380,9 +1380,55 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(gateway_env["SPARK_MISSION_LLM_PROVIDER"], "openai")
         self.assertEqual(envs["spawner-ui"]["SPARK_BUILDER_LLM_PROVIDER"], "openai")
         self.assertEqual(envs["spark-intelligence-builder"]["SPARK_MEMORY_LLM_PROVIDER"], "ollama")
+        self.assertEqual(envs["spawner-ui"]["DEFAULT_MISSION_PROVIDER"], "codex")
+        self.assertEqual(envs["spawner-ui"]["SPAWNER_PRD_AUTO_PROVIDER"], "codex")
+        self.assertEqual(envs["spawner-ui"]["CODEX_PATH"], "/usr/local/bin/codex")
         self.assertNotIn("SPARK_ZAI_API_KEY", envs["spawner-ui"])
         self.assertNotIn("SPARK_OPENAI_API_KEY", envs["spawner-ui"])
         self.assertNotIn("SPARK_SPARK_LLM_PROVIDER", envs["spawner-ui"])
+
+    def test_build_module_envs_wires_codex_as_local_execution_provider(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = "http://127.0.0.1:5173"
+            telegram_relay_secret = None
+            llm_provider = "codex"
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+            codex_model = "gpt-5.5"
+
+        with patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "/usr/local/bin/codex"}):
+            envs = build_module_envs(
+                Args(),
+                {
+                    gateway.name: gateway,
+                    builder.name: builder,
+                    spawner.name: spawner,
+                },
+                {
+                    "telegram.bot_token": "abc",
+                    "telegram.admin_ids": "123",
+                },
+            )
+
+        gateway_env = envs["spark-telegram-bot"]
+        spawner_env = envs["spawner-ui"]
+        self.assertEqual(gateway_env["LLM_PROVIDER"], "codex")
+        self.assertEqual(gateway_env["SPARK_LLM_PROVIDER"], "codex")
+        self.assertEqual(gateway_env["BOT_DEFAULT_PROVIDER"], "codex")
+        self.assertEqual(gateway_env["CODEX_MODEL"], "gpt-5.5")
+        self.assertEqual(gateway_env["CODEX_PATH"], "/usr/local/bin/codex")
+        self.assertEqual(gateway_env["SPARK_CHAT_LLM_AUTH_MODE"], "codex_oauth")
+        self.assertEqual(spawner_env["DEFAULT_MISSION_PROVIDER"], "codex")
+        self.assertEqual(spawner_env["SPAWNER_PRD_AUTO_PROVIDER"], "codex")
+        self.assertEqual(spawner_env["SPARK_CODEX_MODEL"], "gpt-5.5")
+        self.assertEqual(spawner_env["CODEX_PATH"], "/usr/local/bin/codex")
+        self.assertEqual(envs["spark-intelligence-builder"]["SPARK_LLM_PROVIDER"], "codex")
 
     def test_pid_is_running_detects_current_process(self) -> None:
         self.assertTrue(pid_is_running(os.getpid()))
