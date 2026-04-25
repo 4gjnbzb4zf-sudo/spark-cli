@@ -2274,6 +2274,7 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
     telegram_pid = pids.get("spark-telegram-bot") if isinstance(pids, dict) else None
 
     env_values = read_generated_env(MODULE_CONFIG_DIR / "spark-telegram-bot.env")
+    builder_env = read_generated_env(MODULE_CONFIG_DIR / "spark-intelligence-builder.env")
     llm_state = status_payload.get("llm") if isinstance(status_payload.get("llm"), dict) else {}
     llm_hints = build_llm_repair_hints(llm_state) if llm_state else [
         "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers."
@@ -2321,6 +2322,19 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
             "repair": "spark setup telegram-starter",
         }
     )
+    memory_roots_ok = bool(
+        builder_env.get("SPARK_INTELLIGENCE_HOME")
+        and builder_env.get("SPARK_DOMAIN_CHIP_MEMORY_ROOT")
+        and builder_env.get("SPARK_RESEARCHER_ROOT")
+    )
+    checks.append(
+        {
+            "name": "builder_memory_roots",
+            "ok": memory_roots_ok,
+            "detail": "Builder has Spark home, domain-chip-memory, and Researcher roots." if memory_roots_ok else "Builder memory/Researcher roots are not fully wired.",
+            "repair": "spark setup telegram-starter",
+        }
+    )
     checks.append(
         {
             "name": "llm_roles",
@@ -2349,6 +2363,7 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
         "status_repair_hints": status_payload.get("repair_hints", []),
         "next_commands": [
             "spark status",
+            "spark verify --deep",
             "spark restart telegram-starter",
             "spark logs spark-telegram-bot --lines 80",
             "spark setup telegram-starter",
@@ -2502,7 +2517,104 @@ def cmd_providers(args: argparse.Namespace) -> int:
     raise SystemExit(f"Unknown providers command: {args.providers_command}")
 
 
-def collect_verify_payload() -> dict[str, Any]:
+def installed_record_path(installed: object, module_name: str) -> Path | None:
+    if not isinstance(installed, dict):
+        return None
+    record = installed.get(module_name)
+    raw_path = record.get("path") if isinstance(record, dict) else record
+    if not raw_path:
+        return None
+    return Path(str(raw_path)).expanduser()
+
+
+def prepend_pythonpath(env: dict[str, str], paths: list[Path]) -> None:
+    existing = env.get("PYTHONPATH", "").strip()
+    present = [str(path) for path in paths if path.exists()]
+    if not present:
+        return
+    env["PYTHONPATH"] = os.pathsep.join([*present, existing]) if existing else os.pathsep.join(present)
+
+
+def collect_builder_memory_direct_smoke(
+    *,
+    installed: object,
+    builder_home: str,
+    builder_env: dict[str, str],
+) -> dict[str, Any]:
+    builder_path = installed_record_path(installed, "spark-intelligence-builder")
+    memory_path = installed_record_path(installed, "domain-chip-memory")
+    if not builder_home:
+        return {
+            "ok": False,
+            "ran": False,
+            "detail": "Builder home is not configured.",
+            "repair": "spark setup telegram-starter",
+        }
+    missing = []
+    if builder_path is None or not builder_path.exists():
+        missing.append("spark-intelligence-builder")
+    if memory_path is None or not memory_path.exists():
+        missing.append("domain-chip-memory")
+    if missing:
+        return {
+            "ok": False,
+            "ran": False,
+            "detail": f"Cannot run memory smoke because installed module paths are missing: {', '.join(missing)}.",
+            "repair": "spark setup telegram-starter",
+        }
+
+    env = shell_command_env()
+    env.update({key: value for key, value in builder_env.items() if value})
+    env["SPARK_INTELLIGENCE_HOME"] = builder_home
+    env["SPARK_DOMAIN_CHIP_MEMORY_ROOT"] = str(memory_path)
+    prepend_pythonpath(env, [builder_path / "src", memory_path / "src"])
+    command = [
+        sys.executable,
+        "-m",
+        "spark_intelligence.cli",
+        "memory",
+        "direct-smoke",
+        "--home",
+        builder_home,
+        "--sdk-module",
+        "domain_chip_memory",
+        "--json",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(builder_path),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "ran": True,
+            "detail": f"Builder memory direct smoke could not complete: {exc}",
+            "repair": "spark setup telegram-starter",
+        }
+    detail = summarize_command_output(result)
+    if result.returncode == 0:
+        return {
+            "ok": True,
+            "ran": True,
+            "detail": "Builder memory direct smoke wrote, read, and cleaned up through domain-chip-memory.",
+            "repair": "",
+        }
+    return {
+        "ok": False,
+        "ran": True,
+        "detail": detail or f"Builder memory direct smoke failed with exit {result.returncode}.",
+        "repair": "spark setup telegram-starter",
+    }
+
+
+def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
     status_payload = collect_status_payload()
     provider_payload = provider_status_payload()
     setup_state = load_json(CONFIG_PATH, {})
@@ -2628,6 +2740,21 @@ def collect_verify_payload() -> dict[str, Any]:
             "repair": "spark setup telegram-starter",
         }
     )
+    if deep:
+        smoke = collect_builder_memory_direct_smoke(
+            installed=installed,
+            builder_home=builder_home,
+            builder_env=builder_env,
+        )
+        checks.append(
+            {
+                "name": "builder_memory_direct_smoke",
+                "ok": bool(smoke.get("ok")),
+                "required": True,
+                "detail": str(smoke.get("detail") or ""),
+                "repair": str(smoke.get("repair") or "spark setup telegram-starter"),
+            }
+        )
 
     mission_provider = spawner_env.get("DEFAULT_MISSION_PROVIDER") or spawner_env.get("SPARK_MISSION_LLM_BOT_PROVIDER")
     spawner_ok = (
@@ -2672,6 +2799,7 @@ def collect_verify_payload() -> dict[str, Any]:
         "next_commands": [
             "spark status",
             "spark providers status",
+            "spark verify --deep",
             "spark fix telegram",
             "spark start telegram-starter",
             "spark logs spark-telegram-bot --lines 80",
@@ -2681,7 +2809,7 @@ def collect_verify_payload() -> dict[str, Any]:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    payload = collect_verify_payload()
+    payload = collect_verify_payload(deep=getattr(args, "deep", False))
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
@@ -3957,6 +4085,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_parser = subparsers.add_parser("verify", help="Verify launch-critical Spark wiring end to end")
     verify_parser.add_argument("--json", action="store_true")
+    verify_parser.add_argument("--deep", action="store_true", help="Run live write/read memory smoke checks in addition to static wiring checks")
     verify_parser.set_defaults(func=cmd_verify)
 
     fix_parser = subparsers.add_parser("fix", help="Run targeted repair guidance for common Spark issues")

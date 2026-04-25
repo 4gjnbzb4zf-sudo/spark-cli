@@ -2430,8 +2430,10 @@ class SparkCliTests(unittest.TestCase):
         checks = {check["name"]: check for check in payload["checks"]}
         self.assertFalse(checks["bot_token"]["ok"])
         self.assertFalse(checks["admin_allowlist"]["ok"])
+        self.assertFalse(checks["builder_memory_roots"]["ok"])
         self.assertFalse(checks["llm_roles"]["ok"])
         self.assertFalse(checks["telegram_process"]["ok"])
+        self.assertIn("spark verify --deep", payload["next_commands"])
         self.assertIn("spark restart telegram-starter", payload["next_commands"])
 
     def test_provider_status_payload_reports_role_readiness(self) -> None:
@@ -2546,6 +2548,94 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(checks["builder_memory_bridge"]["ok"])
         self.assertTrue(checks["spawner_mission_relay"]["ok"])
         self.assertTrue(checks["runtime_processes"]["ok"])
+
+    def test_collect_verify_payload_deep_runs_builder_memory_direct_smoke(self) -> None:
+        expected = [
+            "spark-researcher",
+            "spark-intelligence-builder",
+            "domain-chip-memory",
+            "spawner-ui",
+            "spark-telegram-bot",
+        ]
+        status_payload = {
+            "ok": True,
+            "modules": [{"name": name, "healthy": True} for name in expected],
+            "tracked_pids": {
+                "spark-telegram-bot": {"pid": 101},
+                "spawner-ui": {"pid": 102},
+            },
+            "repair_hints": [],
+        }
+        provider_payload = {
+            "ok": True,
+            "roles": {
+                role: {"provider": "openai", "auth_mode": "codex_oauth", "ready": True}
+                for role in ("chat", "builder", "memory", "mission")
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            installed = {
+                name: {"path": str(root / "modules" / name)}
+                for name in expected
+            }
+            for name in expected:
+                (root / "modules" / name / "src").mkdir(parents=True, exist_ok=True)
+            setup_state = {
+                "bundle": "telegram-starter",
+                "secret_keys": ["telegram.bot_token", "telegram.admin_ids"],
+                "builder_home": str(root / "state" / "spark-intelligence"),
+            }
+
+            def fake_load_json(path: Path, default: object) -> object:
+                if Path(path).name == "setup.json":
+                    return setup_state
+                if Path(path).name == "installed.json":
+                    return installed
+                return default
+
+            def fake_read_generated_env(path: Path) -> dict[str, str]:
+                if Path(path).name == "spark-telegram-bot.env":
+                    return {
+                        "TELEGRAM_GATEWAY_MODE": "polling",
+                        "SPARK_BUILDER_BRIDGE_MODE": "required",
+                        "SPARK_BUILDER_HOME": str(root / "state" / "spark-intelligence"),
+                    }
+                if Path(path).name == "spark-intelligence-builder.env":
+                    return {
+                        "SPARK_INTELLIGENCE_HOME": str(root / "state" / "spark-intelligence"),
+                        "SPARK_DOMAIN_CHIP_MEMORY_ROOT": str(root / "modules" / "domain-chip-memory"),
+                        "SPARK_RESEARCHER_ROOT": str(root / "modules" / "spark-researcher"),
+                    }
+                if Path(path).name == "spawner-ui.env":
+                    return {
+                        "MISSION_CONTROL_WEBHOOK_URLS": "http://127.0.0.1:8788/spawner-events",
+                        "TELEGRAM_RELAY_SECRET": "relay",
+                        "DEFAULT_MISSION_PROVIDER": "codex",
+                    }
+                return {}
+
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{"ok": true}\n',
+                stderr="",
+            )
+            with patch("spark_cli.cli.collect_status_payload", return_value=status_payload), \
+                patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
+                patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
+                patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+                patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
+                patch("spark_cli.cli.pid_is_running", return_value=True), \
+                patch("spark_cli.cli.subprocess.run", return_value=completed) as run_mock:
+                payload = collect_verify_payload(deep=True)
+        self.assertTrue(payload["ok"])
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertTrue(checks["builder_memory_direct_smoke"]["ok"])
+        self.assertIn("wrote, read, and cleaned up", checks["builder_memory_direct_smoke"]["detail"])
+        command = run_mock.call_args.args[0]
+        self.assertIn("direct-smoke", command)
+        self.assertIn("--sdk-module", command)
 
     def test_collect_verify_payload_flags_missing_mission_provider_and_webhook(self) -> None:
         expected = ["spark-researcher", "spark-intelligence-builder", "domain-chip-memory", "spawner-ui", "spark-telegram-bot"]

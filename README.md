@@ -155,6 +155,14 @@ spark verify
 
 It checks the five-module starter bundle, module healthchecks, LLM roles, Telegram long-polling/security, Builder memory + Researcher wiring, Spawner mission relay, and whether the Telegram bot plus Spawner UI are actually running.
 
+For a live write/read proof that Builder can reach `domain-chip-memory`, run:
+
+```bash
+spark verify --deep
+```
+
+Deep verification runs Builder's direct memory smoke test with cleanup, so a setup agent can distinguish "memory is installed" from "memory is actually wired."
+
 To inspect only LLM choices and role readiness:
 
 ```bash
@@ -199,6 +207,7 @@ For a fresh user, the intended path is:
 spark guide
 spark status
 spark verify
+spark verify --deep
 spark fix telegram
 spark providers status
 spark autostart install --now
@@ -229,7 +238,7 @@ If you are an LLM agent installing Spark for a user:
 1. Prefer the official site/script path the user gives you, or clone `spark-cli` directly if developing locally.
 2. Run `spark setup` first; do not install the five core repos one by one unless debugging.
 3. Use `spark status --json` before declaring the install healthy, and check that the LLM role summary matches the user's intended chat, builder, memory, and mission providers.
-4. Run `spark verify` before declaring the install launch-ready.
+4. Run `spark verify` before declaring the install launch-ready, and `spark verify --deep` before declaring memory wired.
 5. If the bot is quiet, run `spark fix telegram` before editing code.
 6. Never print or commit bot tokens, provider API keys, `.env`, `.env.*`, or `~/.spark/config/secrets.local.json`.
 7. Confirm Telegram's generated env points at Builder with `SPARK_BUILDER_HOME`, and confirm Builder has memory enabled with `domain-chip-memory` active.
