@@ -1565,6 +1565,37 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(detail, "process exited with code 127")
         urlopen.assert_not_called()
 
+    def test_wait_for_ready_check_includes_shell_ready_detail_when_process_exits(self) -> None:
+        module = Module(
+            name="telegram-target",
+            path=Path("C:/tmp/telegram-target"),
+            manifest={
+                "module": {"name": "telegram-target", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                "run": {"default": {"ready_check": "npm run health:polling"}},
+                "healthcheck": {"timeout_seconds": 20},
+            },
+        )
+
+        class ExitedProcess:
+            def poll(self) -> int:
+                return 1
+
+        completed = subprocess.CompletedProcess(
+            "npm run health:polling",
+            1,
+            stdout="",
+            stderr="Telegram health: FAILED - Telegram rejected BOT_TOKEN.",
+        )
+
+        with patch("spark_cli.cli.module_runtime_env", return_value={}), \
+             patch("spark_cli.cli.run_shell", return_value=completed) as run:
+            ready, detail = wait_for_ready_check(module, process=ExitedProcess())  # type: ignore[arg-type]
+
+        self.assertFalse(ready)
+        self.assertIn("Telegram rejected BOT_TOKEN", detail)
+        self.assertIn("process exited with code 1", detail)
+        run.assert_called_once_with("npm run health:polling", module.path, env={}, timeout=20)
+
     def test_wait_for_ready_check_accepts_running_process(self) -> None:
         module = Module(
             name="polling-target",
