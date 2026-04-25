@@ -45,6 +45,8 @@ AUTOSTART_LAUNCHD_LABEL = "ai.sparkswarm.spark-telegram-agent"
 AUTOSTART_WINDOWS_TASK_NAME = "Spark Telegram Agent"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_REGISTRY_PATH = REPO_ROOT / "registry.json"
+DEFAULT_TELEGRAM_PROFILE = "default"
+TELEGRAM_PROFILE_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,38}[a-z0-9]$")
 
 try:  # keyring is an optional runtime dep; we degrade gracefully without it.
     import keyring as _keyring
@@ -483,13 +485,22 @@ def read_clipboard_text() -> str:
                 return value
     raise SystemExit(
         "Could not read a secret from the system clipboard. Copy the value first, then use `@clipboard`, "
-        "or pass the value directly."
+        "use `@env:NAME`, or pass the value directly."
     )
 
 
 def resolve_secret_input(value: str) -> str:
-    if value.strip().lower() == "@clipboard":
+    stripped = value.strip()
+    if stripped.lower() == "@clipboard":
         return read_clipboard_text()
+    if stripped.lower().startswith("@env:"):
+        env_name = stripped[5:].strip()
+        if not env_name:
+            raise SystemExit("Invalid secret reference: @env: requires an environment variable name.")
+        env_value = os.environ.get(env_name)
+        if not env_value:
+            raise SystemExit(f"Environment variable {env_name} is not set or is empty.")
+        return env_value
     return value
 
 
@@ -894,8 +905,53 @@ def run_setup_wizard(
     return collected
 
 
-def generated_module_env_path(module: Module) -> Path:
+def normalize_telegram_profile(profile: str | None) -> str:
+    normalized = (profile or DEFAULT_TELEGRAM_PROFILE).strip().lower()
+    if normalized in {"", DEFAULT_TELEGRAM_PROFILE}:
+        return DEFAULT_TELEGRAM_PROFILE
+    if not TELEGRAM_PROFILE_PATTERN.match(normalized):
+        raise SystemExit(
+            "Invalid Telegram profile name. Use 2-40 lowercase letters, numbers, and dashes; "
+            "start with a letter and end with a letter or number."
+        )
+    return normalized
+
+
+def telegram_profile_is_default(profile: str | None) -> bool:
+    return normalize_telegram_profile(profile) == DEFAULT_TELEGRAM_PROFILE
+
+
+def module_process_key(module_name: str, profile: str | None = None) -> str:
+    normalized = normalize_telegram_profile(profile)
+    if module_name == "spark-telegram-bot" and normalized != DEFAULT_TELEGRAM_PROFILE:
+        return f"{module_name}:{normalized}"
+    return module_name
+
+
+def generated_module_env_path(module: Module, profile: str | None = None) -> Path:
+    normalized = normalize_telegram_profile(profile)
+    if module.name == "spark-telegram-bot" and normalized != DEFAULT_TELEGRAM_PROFILE:
+        return MODULE_CONFIG_DIR / f"{module.name}.{normalized}.env"
     return MODULE_CONFIG_DIR / f"{module.name}.env"
+
+
+def telegram_profile_secret_id(profile: str, secret_name: str) -> str:
+    normalized = normalize_telegram_profile(profile)
+    return f"telegram.profiles.{normalized}.{secret_name}"
+
+
+def keychain_env_for_telegram_profile(profile: str | None) -> dict[str, str]:
+    normalized = normalize_telegram_profile(profile)
+    if normalized == DEFAULT_TELEGRAM_PROFILE:
+        return {}
+    env: dict[str, str] = {}
+    bot_token = fetch_secret(telegram_profile_secret_id(normalized, "bot_token"))
+    relay_secret = fetch_secret(telegram_profile_secret_id(normalized, "relay_secret"))
+    if bot_token:
+        env["BOT_TOKEN"] = bot_token
+    if relay_secret:
+        env["TELEGRAM_RELAY_SECRET"] = relay_secret
+    return env
 
 
 def spark_builder_home() -> Path:
@@ -921,10 +977,14 @@ def read_generated_env(path: Path) -> dict[str, str]:
     return values
 
 
-def module_runtime_env(module: Module) -> dict[str, str]:
+def module_runtime_env(module: Module, profile: str | None = None) -> dict[str, str]:
     env = shell_command_env()
     env.update(read_generated_env(generated_module_env_path(module)))
+    if module.name == "spark-telegram-bot" and not telegram_profile_is_default(profile):
+        env.update(read_generated_env(generated_module_env_path(module, profile)))
     env.update(keychain_env_for_module(module))
+    if module.name == "spark-telegram-bot":
+        env.update(keychain_env_for_telegram_profile(profile))
     return env
 
 
@@ -1332,6 +1392,106 @@ def split_telegram_admin_ids(raw_admin_ids: str | None) -> list[str]:
         if admin_id and admin_id not in admin_ids:
             admin_ids.append(admin_id)
     return admin_ids
+
+
+def next_telegram_profile_relay_port(setup_state: dict[str, Any]) -> int:
+    used_ports = {8788}
+    profiles = setup_state.get("telegram_profiles")
+    if isinstance(profiles, dict):
+        for profile_state in profiles.values():
+            if isinstance(profile_state, dict):
+                try:
+                    used_ports.add(int(profile_state.get("relay_port", 0)))
+                except (TypeError, ValueError):
+                    pass
+    port = 8789
+    while port in used_ports:
+        port += 1
+    return port
+
+
+def append_spawner_webhook_url(spawner: Module, webhook_url: str) -> None:
+    generated_path = generated_module_env_path(spawner)
+    generated_env = read_generated_env(generated_path)
+    existing_urls = [
+        item.strip()
+        for item in generated_env.get("MISSION_CONTROL_WEBHOOK_URLS", "").split(",")
+        if item.strip()
+    ]
+    if webhook_url not in existing_urls:
+        existing_urls.append(webhook_url)
+    generated_env["MISSION_CONTROL_WEBHOOK_URLS"] = ",".join(existing_urls)
+    write_generated_env(generated_path, generated_env)
+    env_path = module_env_path(spawner)
+    if env_path is not None:
+        update_env_file(env_path, generated_env)
+
+
+def configure_telegram_profile(args: argparse.Namespace) -> int:
+    profile = normalize_telegram_profile(getattr(args, "profile", None))
+    installed = resolve_installed_modules()
+    gateway = installed.get("spark-telegram-bot")
+    spawner = installed.get("spawner-ui")
+    if gateway is None or spawner is None:
+        raise SystemExit("Install the telegram-starter bundle before adding Telegram profiles: spark setup")
+
+    bot_token_arg = getattr(args, "bot_token", None)
+    if bot_token_arg:
+        bot_token = resolve_secret_input(str(bot_token_arg))
+    else:
+        bot_token = fetch_secret(telegram_profile_secret_id(profile, "bot_token"))
+    if not bot_token:
+        raise SystemExit(
+            "Missing profile bot token. Pass --bot-token @clipboard or --bot-token @env:SPARK_TELEGRAM_BOT_TOKEN."
+        )
+
+    base_env = read_generated_env(generated_module_env_path(gateway))
+    setup_state = load_json(CONFIG_PATH, {})
+    relay_port = getattr(args, "telegram_relay_port", None) or next_telegram_profile_relay_port(setup_state)
+    try:
+        relay_port = int(relay_port)
+    except (TypeError, ValueError):
+        raise SystemExit("--telegram-relay-port must be a number.")
+    if relay_port <= 0 or relay_port > 65535:
+        raise SystemExit("--telegram-relay-port must be between 1 and 65535.")
+
+    profile_env = dict(base_env)
+    profile_env["ADMIN_TELEGRAM_IDS"] = getattr(args, "admin_telegram_ids", None) or base_env.get("ADMIN_TELEGRAM_IDS", "")
+    profile_env["TELEGRAM_GATEWAY_MODE"] = "polling"
+    profile_env["TELEGRAM_RELAY_PORT"] = str(relay_port)
+    profile_env["SPARK_TELEGRAM_PROFILE"] = profile
+    profile_env.pop("BOT_TOKEN", None)
+
+    write_generated_env(generated_module_env_path(gateway, profile), profile_env)
+    backend = store_secret(telegram_profile_secret_id(profile, "bot_token"), bot_token, preferred="keychain")
+
+    webhook_url = f"http://127.0.0.1:{relay_port}/spawner-events"
+    append_spawner_webhook_url(spawner, webhook_url)
+
+    profiles = setup_state.setdefault("telegram_profiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+        setup_state["telegram_profiles"] = profiles
+    profiles[profile] = {
+        "module": "spark-telegram-bot",
+        "env_file": str(generated_module_env_path(gateway, profile)),
+        "relay_port": relay_port,
+        "webhook_url": webhook_url,
+        "bot_token_secret": telegram_profile_secret_id(profile, "bot_token"),
+        "admin_ids_configured": bool(profile_env.get("ADMIN_TELEGRAM_IDS")),
+        "configured_at": timestamp_now(),
+    }
+    save_json(CONFIG_PATH, setup_state)
+
+    print(f"Telegram profile configured: {profile}")
+    print(f"Profile env: {generated_module_env_path(gateway, profile)}")
+    print(f"Secret {telegram_profile_secret_id(profile, 'bot_token')} -> {backend}")
+    print(f"Spawner mission relay URL added: {webhook_url}")
+    print("Start it with:")
+    print(f"  spark start spark-telegram-bot --profile {profile}")
+    print("Read its logs with:")
+    print(f"  spark logs spark-telegram-bot --profile {profile}")
+    return 0
 
 
 def initialize_builder_runtime_home(modules_by_name: dict[str, Module], secret_values: dict[str, str] | None = None) -> list[str]:
@@ -2380,6 +2540,8 @@ def print_setup_summary(
 
 def cmd_setup(args: argparse.Namespace) -> int:
     ensure_state_dirs()
+    if not telegram_profile_is_default(getattr(args, "profile", None)):
+        return configure_telegram_profile(args)
     plan = resolve_setup_bundle_plan(args)
     interactive = setup_is_interactive(args)
     if interactive:
@@ -2545,6 +2707,7 @@ def collect_status_payload() -> dict[str, Any]:
         "summary": "Spark CLI spike status",
         "telegram_ingress_owner": setup_state.get("telegram_ingress_owner"),
         "llm": setup_state.get("llm"),
+        "telegram_profiles": telegram_profile_runtime_status(setup_state, tracked_pids),
         "modules": module_results,
         "tracked_pids": tracked_pids,
         "config_dir": str(CONFIG_DIR),
@@ -2581,6 +2744,16 @@ def cmd_status(args: argparse.Namespace) -> int:
                 for role in LLM_ROLES
             )
             print(f"LLM roles: {role_summary}")
+    profiles = payload.get("telegram_profiles")
+    if isinstance(profiles, list) and profiles:
+        profile_summary = ", ".join(
+            f"{item.get('profile')}={'running' if item.get('running') else 'stopped'}"
+            + (f"(:{item.get('relay_port')})" if item.get("relay_port") else "")
+            for item in profiles
+            if isinstance(item, dict)
+        )
+        if profile_summary:
+            print(f"Telegram profiles: {profile_summary}")
     for hint in payload.get("repair_hints", []):
         print(f"Repair: {hint}")
     print("")
@@ -3382,7 +3555,12 @@ def post_ready_watch_seconds(module: Module) -> int:
     return min(8, ready_timeout_seconds(module))
 
 
-def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None = None) -> tuple[bool, str]:
+def wait_for_ready_check(
+    module: Module,
+    process: subprocess.Popen[Any] | None = None,
+    *,
+    profile: str | None = None,
+) -> tuple[bool, str]:
     ready_check = module.ready_check
     if not ready_check:
         return True, "no ready check declared"
@@ -3406,7 +3584,12 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
             exit_code = process.poll()
             if exit_code is not None:
                 if not ready_check.startswith(("http://", "https://")):
-                    result = run_shell(ready_check, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
+                    result = run_shell(
+                        ready_check,
+                        module.path,
+                        env=module_runtime_env(module, profile),
+                        timeout=timeout_seconds,
+                    )
                     if result.returncode == 0:
                         return True, summarize_command_output(result)
                     ready_detail = summarize_command_output(result).rstrip(".")
@@ -3421,7 +3604,12 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
             except (urllib.error.URLError, TimeoutError, OSError) as error:
                 last_error = str(error)
         else:
-            result = run_shell(ready_check, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
+            result = run_shell(
+                ready_check,
+                module.path,
+                env=module_runtime_env(module, profile),
+                timeout=timeout_seconds,
+            )
             if result.returncode == 0:
                 detail = summarize_command_output(result)
                 if process is not None:
@@ -3439,8 +3627,10 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
     return False, f"ready check did not pass within {timeout_seconds}s: {last_error}"
 
 
-def format_start_warning(module: Module, detail: str, process: subprocess.Popen[Any]) -> str:
-    log_hint = f"Run `spark logs {module.name} --lines 80` for startup logs."
+def format_start_warning(module: Module, detail: str, process: subprocess.Popen[Any], profile: str | None = None) -> str:
+    normalized = normalize_telegram_profile(profile)
+    profile_hint = f" --profile {normalized}" if module.name == "spark-telegram-bot" and normalized != DEFAULT_TELEGRAM_PROFILE else ""
+    log_hint = f"Run `spark logs {module.name}{profile_hint} --lines 80` for startup logs."
     exit_code = process.poll()
     if exit_code is not None:
         if "process exited with code" in detail.lower():
@@ -3470,28 +3660,63 @@ def process_runtime_detail(pids: dict[str, Any], module_names: list[str]) -> tup
     return False, "Missing Spark-supervised runtime process(es): " + ", ".join(missing) + "."
 
 
-def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
+def telegram_profile_runtime_status(setup_state: dict[str, Any], pids: dict[str, Any]) -> list[dict[str, Any]]:
+    profiles = setup_state.get("telegram_profiles")
+    if not isinstance(profiles, dict):
+        return []
+    statuses: list[dict[str, Any]] = []
+    for profile, profile_state in sorted(profiles.items()):
+        if not isinstance(profile_state, dict):
+            continue
+        normalized = normalize_telegram_profile(str(profile))
+        process_key = module_process_key("spark-telegram-bot", normalized)
+        record = pids.get(process_key) if isinstance(pids, dict) else None
+        pid = 0
+        if isinstance(record, dict):
+            try:
+                pid = int(record.get("pid", 0))
+            except (TypeError, ValueError):
+                pid = 0
+        statuses.append(
+            {
+                "profile": normalized,
+                "process_key": process_key,
+                "pid": pid or None,
+                "running": bool(pid and pid_is_running(pid)),
+                "relay_port": profile_state.get("relay_port"),
+                "log_path": str(module_log_path("spark-telegram-bot", normalized)),
+            }
+        )
+    return statuses
+
+
+def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: str | None = None) -> bool:
     command = module.run_command
     if not command:
         return True
 
+    process_key = module_process_key(module.name, profile)
+    display_name = process_key
     pids = load_pids()
-    existing = pids.get(module.name)
+    existing = pids.get(process_key)
     if existing:
         existing_pid = int(existing.get("pid", 0))
         if pid_is_running(existing_pid):
-            print(f"Skipping {module.name}: already running (pid {existing_pid})")
+            print(f"Skipping {display_name}: already running (pid {existing_pid})")
             return True
-        pids.pop(module.name, None)
+        pids.pop(process_key, None)
         save_pids(pids)
 
-    module_log_dir = LOG_DIR / module.name
-    module_log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = module_log_dir / "process.log"
-    append_process_log(module.name, f"starting command={command!r} cwd={module.path} ready_check={module.ready_check!r}")
+    log_path = module_log_path(module.name, profile)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    append_process_log(
+        module.name,
+        f"starting command={command!r} cwd={module.path} ready_check={module.ready_check!r}",
+        profile=profile,
+    )
     log_handle = log_path.open("a", encoding="utf-8")
 
-    subprocess_env = module_runtime_env(module)
+    subprocess_env = module_runtime_env(module, profile)
     popen_kwargs: dict[str, Any] = {
         "cwd": str(module.path),
         "shell": True,
@@ -3508,8 +3733,10 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
         process = subprocess.Popen(command, **popen_kwargs)
     finally:
         log_handle.close()
-    pids[module.name] = {
+    pids[process_key] = {
         "pid": process.pid,
+        "module": module.name,
+        "profile": normalize_telegram_profile(profile),
         "command": command,
         "path": str(module.path),
         "started_at": timestamp_now(),
@@ -3517,20 +3744,20 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
         "ready_check": module.ready_check,
     }
     save_pids(pids)
-    print(f"Started {module.name} (pid {process.pid})")
-    ready, detail = wait_for_ready_check(module, process=process)
+    print(f"Started {display_name} (pid {process.pid})")
+    ready, detail = wait_for_ready_check(module, process=process, profile=profile)
     if ready:
-        print(f"Ready {module.name}: {detail}")
-        append_process_log(module.name, f"ready pid={process.pid} detail={detail}")
+        print(f"Ready {display_name}: {detail}")
+        append_process_log(module.name, f"ready pid={process.pid} detail={detail}", profile=profile)
     else:
-        warning = format_start_warning(module, detail, process)
-        print(f"Start warning for {module.name}: {warning}")
-        append_process_log(module.name, f"start warning pid={process.pid} detail={warning}")
+        warning = format_start_warning(module, detail, process, profile=profile)
+        print(f"Start warning for {display_name}: {warning}")
+        append_process_log(module.name, f"start warning pid={process.pid} detail={warning}", profile=profile)
         if process.poll() is not None:
             latest_pids = load_pids()
-            latest_record = latest_pids.get(module.name, {})
+            latest_record = latest_pids.get(process_key, {})
             if int(latest_record.get("pid", 0)) == int(process.pid):
-                latest_pids.pop(module.name, None)
+                latest_pids.pop(process_key, None)
                 save_pids(latest_pids)
         if allow_boot_warnings and process.poll() is None:
             return True
@@ -3544,12 +3771,18 @@ def cmd_start(args: argparse.Namespace) -> int:
         print("No installed Spark modules recorded. Run `spark setup telegram-starter` first.")
         return 1
     exit_code = 0
+    profile = normalize_telegram_profile(getattr(args, "profile", None))
     target_modules = resolve_start_modules(args.target, modules)
     for module in target_modules:
         if not module.run_command:
             print(f"Skipping {module.name}: no run.default command declared")
             continue
-        if not start_module(module, allow_boot_warnings=getattr(args, "allow_boot_warnings", False)):
+        module_profile = profile if module.name == "spark-telegram-bot" else DEFAULT_TELEGRAM_PROFILE
+        if not start_module(
+            module,
+            allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
+            profile=module_profile,
+        ):
             exit_code = 1
     return exit_code
 
@@ -3572,7 +3805,15 @@ def cmd_stop(args: argparse.Namespace) -> int:
         return 0
 
     installed_modules = resolve_installed_modules()
-    target_names = resolve_stop_module_names(args.target, installed_modules, pids)
+    profile = normalize_telegram_profile(getattr(args, "profile", None))
+    if profile != DEFAULT_TELEGRAM_PROFILE:
+        requested_names = expand_targets(args.target, installed_modules, include_all=True)
+        if "spark-telegram-bot" not in requested_names:
+            print(f"Profile {profile} only applies to spark-telegram-bot; no profiled process stopped.")
+            return 0
+        target_names = [module_process_key("spark-telegram-bot", profile)]
+    else:
+        target_names = resolve_stop_module_names(args.target, installed_modules, pids)
     for name in target_names:
         record = pids.get(name)
         if not record:
@@ -3590,6 +3831,22 @@ def cmd_restart(args: argparse.Namespace) -> int:
     if not installed_modules:
         print("No installed Spark modules recorded. Run `spark setup telegram-starter` first.")
         return 1
+    profile = normalize_telegram_profile(getattr(args, "profile", None))
+    if profile != DEFAULT_TELEGRAM_PROFILE:
+        requested_names = expand_targets(args.target, installed_modules, include_all=True)
+        if "spark-telegram-bot" not in requested_names:
+            print(f"Profile {profile} only applies to spark-telegram-bot; restarting default target instead.")
+        else:
+            stop_code = cmd_stop(args)
+            module = installed_modules["spark-telegram-bot"]
+            start_code = 0
+            if not start_module(
+                module,
+                allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
+                profile=profile,
+            ):
+                start_code = 1
+            return start_code or stop_code
     restart_modules = resolve_restart_modules(args.target, installed_modules, load_pids())
     stop_code = cmd_stop(args)
     start_code = 0
@@ -3945,12 +4202,15 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
     raise SystemExit(f"Autostart is not supported on this platform yet: {sys.platform}")
 
 
-def module_log_path(module_name: str) -> Path:
+def module_log_path(module_name: str, profile: str | None = None) -> Path:
+    normalized = normalize_telegram_profile(profile)
+    if module_name == "spark-telegram-bot" and normalized != DEFAULT_TELEGRAM_PROFILE:
+        return LOG_DIR / module_name / f"{normalized}.log"
     return LOG_DIR / module_name / "process.log"
 
 
-def append_process_log(module_name: str, message: str) -> None:
-    path = module_log_path(module_name)
+def append_process_log(module_name: str, message: str, profile: str | None = None) -> None:
+    path = module_log_path(module_name, profile)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", errors="replace") as handle:
         handle.write(f"[spark-cli {timestamp_now()}] {message.rstrip()}\n")
@@ -4310,9 +4570,13 @@ def cmd_logs(args: argparse.Namespace) -> int:
     installed = resolve_installed_modules()
     if args.target not in installed:
         raise SystemExit(f"Unknown installed module: {args.target}")
-    path = module_log_path(args.target)
+    profile = normalize_telegram_profile(getattr(args, "profile", None))
+    if profile != DEFAULT_TELEGRAM_PROFILE and args.target != "spark-telegram-bot":
+        raise SystemExit("--profile only applies to spark-telegram-bot logs.")
+    path = module_log_path(args.target, profile)
     if not path.exists():
-        print(f"No logs yet for {args.target} at {path}")
+        display_name = module_process_key(args.target, profile)
+        print(f"No logs yet for {display_name} at {path}")
         print("Start the module first with `spark start`.")
         return 1
     for line in tail_log_lines(path, args.lines):
@@ -4459,6 +4723,13 @@ def onboarding_guide_payload() -> dict[str, Any]:
             "spark autostart install --now",
             "spark start telegram-starter",
         ],
+        "multi_bot_profiles": [
+            "Use a profile when you want a second Telegram bot on the same Spark install.",
+            "Each profile gets its own bot token, local relay port, pid, and log file.",
+            "Profiles still share the same local Builder, memory, LLM roles, and Spawner unless you intentionally split those later.",
+            "Example: spark setup --profile qa-bot --bot-token @clipboard --admin-telegram-ids <YOUR_TELEGRAM_ID>",
+            "Then run: spark start spark-telegram-bot --profile qa-bot",
+        ],
         "telegram_commands": [
             { "command": "/start", "use": "Show the basic command surface." },
             { "command": "/myid", "use": "Show your numeric Telegram id for admin setup." },
@@ -4478,12 +4749,14 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark autostart install --now", "use": "Turn on the Telegram agent now and every time this computer logs in." },
             { "command": "spark autostart status", "use": "Check whether login autostart is installed." },
             { "command": "spark logs spark-telegram-bot", "use": "Read Telegram gateway logs." },
+            { "command": "spark logs spark-telegram-bot --profile qa-bot", "use": "Read logs for an extra Telegram bot profile." },
             { "command": "spark logs spawner-ui", "use": "Read mission-control logs." },
             { "command": "spark secrets list", "use": "Confirm configured secret ids without printing secret values." },
             { "command": "spark setup", "use": "Rerun onboarding safely when changing bot, admin ids, or LLM provider." },
         ],
         "troubleshooting": [
             "Bot receives no messages: make sure only one polling process is running, then restart spark-telegram-bot.",
+            "Second bot receives no messages: run spark restart spark-telegram-bot --profile <profile> and check spark logs spark-telegram-bot --profile <profile>.",
             "Bot is quiet and you are not sure why: run spark fix telegram.",
             "Bot says admin only: send /myid, add that numeric id during spark setup, then restart.",
             "LLM does not answer: rerun spark setup with providers for chat, builder, memory, and mission, then run spark status.",
@@ -4523,7 +4796,11 @@ def cmd_guide(args: argparse.Namespace) -> int:
     for item in payload["telegram_commands"]:
         print(f"   {item['command']}: {item['use']}")
     print("")
-    print("5. How the modules work together")
+    print("5. Optional: run another Telegram bot")
+    for item in payload["multi_bot_profiles"]:
+        print(f"   - {item}")
+    print("")
+    print("6. How the modules work together")
     for item in payload["starter_bundle"]:
         print(f"   {item['module']}: {item['role']}")
     print("")
@@ -4574,23 +4851,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip interactive preflight and secret prompts (require --secret for every required secret).",
     )
-    setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value; use value @clipboard to read from the OS clipboard")
-    setup_parser.add_argument("--bot-token", help="Telegram BotFather token, or @clipboard")
+    setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value; use @clipboard or @env:NAME for secret input")
+    setup_parser.add_argument("--bot-token", help="Telegram BotFather token, @clipboard, or @env:NAME")
     setup_parser.add_argument("--admin-telegram-ids")
     setup_parser.add_argument("--telegram-relay-secret")
+    setup_parser.add_argument("--telegram-relay-port", type=int, help="Local Telegram mission relay port for a non-default profile")
+    setup_parser.add_argument(
+        "--profile",
+        default=DEFAULT_TELEGRAM_PROFILE,
+        help="Configure an extra Telegram bot profile without replacing the default bot",
+    )
     setup_parser.add_argument("--spawner-ui-url", default="http://127.0.0.1:5173")
     setup_parser.add_argument("--llm-provider", choices=LLM_PROVIDER_CHOICES, help="Default provider for all Spark LLM roles unless a role-specific provider is set")
     setup_parser.add_argument("--chat-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Telegram chat replies")
     setup_parser.add_argument("--builder-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Builder reasoning and orchestration")
     setup_parser.add_argument("--memory-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for memory synthesis and recall")
     setup_parser.add_argument("--mission-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Spawner missions and coding/build work")
-    setup_parser.add_argument("--zai-api-key", help="Z.AI / GLM coding endpoint API key, or @clipboard")
+    setup_parser.add_argument("--zai-api-key", help="Z.AI / GLM coding endpoint API key, @clipboard, or @env:NAME")
     setup_parser.add_argument("--zai-base-url", default="https://api.z.ai/api/coding/paas/v4/")
     setup_parser.add_argument("--zai-model", default="glm-5.1")
-    setup_parser.add_argument("--openai-api-key", help="OpenAI API key, or @clipboard")
+    setup_parser.add_argument("--openai-api-key", help="OpenAI API key, @clipboard, or @env:NAME")
     setup_parser.add_argument("--openai-base-url", default="https://api.openai.com/v1")
     setup_parser.add_argument("--openai-model", default="gpt-5.5")
-    setup_parser.add_argument("--anthropic-api-key", help="Anthropic API key, or @clipboard")
+    setup_parser.add_argument("--anthropic-api-key", help="Anthropic API key, @clipboard, or @env:NAME")
     setup_parser.add_argument("--anthropic-base-url", default="https://api.anthropic.com")
     setup_parser.add_argument("--anthropic-model", default="claude-sonnet-4.5")
     setup_parser.add_argument("--ollama-url", default="http://localhost:11434")
@@ -4637,14 +4920,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     start_parser = subparsers.add_parser("start", help="Start startable modules")
     start_parser.add_argument("--allow-boot-warnings", action="store_true", help=argparse.SUPPRESS)
+    start_parser.add_argument("--profile", default=DEFAULT_TELEGRAM_PROFILE, help="Telegram bot profile to start")
     start_parser.add_argument("target", nargs="?")
     start_parser.set_defaults(func=cmd_start)
 
     stop_parser = subparsers.add_parser("stop", help="Stop tracked Spark processes")
+    stop_parser.add_argument("--profile", default=DEFAULT_TELEGRAM_PROFILE, help="Telegram bot profile to stop")
     stop_parser.add_argument("target", nargs="?")
     stop_parser.set_defaults(func=cmd_stop)
 
     restart_parser = subparsers.add_parser("restart", help="Restart startable modules")
+    restart_parser.add_argument("--profile", default=DEFAULT_TELEGRAM_PROFILE, help="Telegram bot profile to restart")
     restart_parser.add_argument("target", nargs="?")
     restart_parser.set_defaults(func=cmd_restart)
 
@@ -4716,6 +5002,7 @@ def build_parser() -> argparse.ArgumentParser:
     secrets_delete_parser.set_defaults(func=cmd_secrets_delete)
 
     logs_parser = subparsers.add_parser("logs", help="Show process logs for an installed module")
+    logs_parser.add_argument("--profile", default=DEFAULT_TELEGRAM_PROFILE, help="Telegram bot profile logs to read")
     logs_parser.add_argument("target")
     logs_parser.add_argument("-n", "--lines", type=int, default=200, help="Lines of history to show before following (default: 200, 0 = all)")
     logs_parser.add_argument("-f", "--follow", action="store_true", help="Tail the log and stream new lines")

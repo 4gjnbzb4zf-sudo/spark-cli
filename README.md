@@ -143,6 +143,11 @@ spark setup --llm-provider zai --zai-api-key @clipboard --resume
 ```
 
 The same shortcut works for BotFather tokens and generic secrets, for example `spark setup --bot-token @clipboard --resume`.
+If a shell cannot paste secrets cleanly, put the value in an environment variable and reference it without printing it:
+
+```bash
+spark setup --bot-token @env:TELEGRAM_BOT_TOKEN --admin-telegram-ids "$TELEGRAM_ADMIN_IDS"
+```
 
 Rerunning setup is meant to be a fast configuration refresh. If the starter stack is already installed, `spark setup --resume` reuses the installed modules and skips `pip`/`npm` dependency commands by default, so your terminal stays responsive. To intentionally repair or reinstall dependencies, run:
 
@@ -169,6 +174,18 @@ spark fix telegram
 ```
 
 It checks the starter install, Telegram module health, BotFather token, admin allowlist, Builder bridge, LLM roles, supervised process state, and the next log/status commands to run.
+
+### Extra Telegram Bot Profiles
+
+You can run more than one Telegram bot on the same Spark install for QA, practice, or separate surfaces. Do not start the old direct Builder gateway for this; every live bot should run through `spark-telegram-bot` so conversation, memory suppression, Builder, and Spawner behavior stays consistent.
+
+```bash
+spark setup --profile qa-bot --bot-token @clipboard --admin-telegram-ids <YOUR_TELEGRAM_ID>
+spark start spark-telegram-bot --profile qa-bot
+spark logs spark-telegram-bot --profile qa-bot
+```
+
+Profile setup creates a separate generated env file, local relay port, pid, and log file for the extra bot. Profiles share the same Builder home, memory chip, LLM role configuration, and Spawner UI by default.
 
 For a fuller launch-readiness proof, run:
 
@@ -279,9 +296,11 @@ Use `spark <cmd> --help` for full flags.
 | `spark init <name>` | Scaffold a new module |
 | `spark install <target>` | Install by registry name, bundle, local path, or git URL |
 | `spark setup [bundle]` | Interactive preflight and secret prompts for a bundle; defaults to `telegram-starter` |
+| `spark setup --profile <name>` | Add a second Telegram bot profile without replacing the default bot |
 | `spark update [target]` | Re-run install commands and pull managed git clones |
 | `spark uninstall [target]` | Stop, remove generated env, delete clone, and rotate secrets |
 | `spark start [target]` | Topological launch using `needs.modules` order |
+| `spark start spark-telegram-bot --profile <name>` | Start one extra Telegram bot profile |
 | `spark stop [target]` | Reverse-topological stop |
 | `spark autostart install --now` | Start Spark now and automatically at computer login |
 | `spark autostart status` | Show whether the login hook is installed |

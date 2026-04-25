@@ -26,6 +26,7 @@ from spark_cli.cli import (
     collect_setup_configuration,
     collect_telegram_fix_payload,
     collect_verify_payload,
+    configure_telegram_profile,
     cmd_setup,
     cmd_update,
     console_safe_text,
@@ -53,7 +54,11 @@ from spark_cli.cli import (
     load_json,
     long_path_aware,
     module_log_path,
+    module_process_key,
+    module_runtime_env,
     module_secret_env_bindings,
+    next_telegram_profile_relay_port,
+    normalize_telegram_profile,
     check_runtime_version_for_module,
     clear_install_progress,
     coerce_config_value,
@@ -121,6 +126,7 @@ from spark_cli.cli import (
     split_telegram_admin_ids,
     start_module,
     stop_module,
+    telegram_profile_runtime_status,
     wait_for_ready_check,
     windows_service_creationflags,
     resolve_bundle_names,
@@ -140,6 +146,7 @@ from spark_cli.cli import (
     windows_startup_script_path,
     write_windows_startup_script,
     write_runtime_shim,
+    telegram_profile_secret_id,
 )
 
 
@@ -240,6 +247,141 @@ class SparkCliTests(unittest.TestCase):
             path = Path(tmp_dir) / "registry.json"
             path.write_text('\ufeff{"ok": true}', encoding="utf-8")
             self.assertEqual(load_json(path, {}), {"ok": True})
+
+    def test_telegram_profile_helpers_scope_only_bot_processes(self) -> None:
+        self.assertEqual(normalize_telegram_profile(None), "default")
+        self.assertEqual(normalize_telegram_profile("Spark-AGI"), "spark-agi")
+        self.assertEqual(module_process_key("spark-telegram-bot", "qa-bot"), "spark-telegram-bot:qa-bot")
+        self.assertEqual(module_process_key("spawner-ui", "qa-bot"), "spawner-ui")
+        self.assertEqual(telegram_profile_secret_id("QA-Bot", "bot_token"), "telegram.profiles.qa-bot.bot_token")
+        with self.assertRaises(SystemExit):
+            normalize_telegram_profile("../bad")
+
+    def test_resolve_secret_input_can_read_environment_reference(self) -> None:
+        with patch.dict(os.environ, {"SPARK_TEST_SECRET": "secret-value"}, clear=False):
+            self.assertEqual(resolve_secret_input("@env:SPARK_TEST_SECRET"), "secret-value")
+        with self.assertRaises(SystemExit):
+            resolve_secret_input("@env:SPARK_TEST_SECRET_MISSING")
+
+    def test_profile_runtime_env_overlays_profile_token_and_env(self) -> None:
+        bot = make_module("spark-telegram-bot", ["telegram.ingress"], ["telegram.bot_token", "telegram.relay_secret"])
+
+        def fake_read_env(path: Path) -> dict[str, str]:
+            name = path.name
+            if name == "spark-telegram-bot.env":
+                return {
+                    "BOT_TOKEN": "default-token-from-file",
+                    "TELEGRAM_RELAY_SECRET": "shared-relay",
+                    "TELEGRAM_RELAY_PORT": "8788",
+                }
+            if name == "spark-telegram-bot.qa-bot.env":
+                return {
+                    "TELEGRAM_RELAY_PORT": "8789",
+                    "SPARK_TELEGRAM_PROFILE": "qa-bot",
+                }
+            return {}
+
+        def fake_fetch_secret(secret_id: str) -> str | None:
+            values = {
+                "telegram.profiles.qa-bot.bot_token": "profile-token",
+            }
+            return values.get(secret_id)
+
+        with patch("spark_cli.cli.shell_command_env", return_value={}):
+            with patch("spark_cli.cli.read_generated_env", side_effect=fake_read_env):
+                with patch("spark_cli.cli.keychain_env_for_module", return_value={"BOT_TOKEN": "default-token", "TELEGRAM_RELAY_SECRET": "shared-relay"}):
+                    with patch("spark_cli.cli.fetch_secret", side_effect=fake_fetch_secret):
+                        env = module_runtime_env(bot, "qa-bot")
+        self.assertEqual(env["BOT_TOKEN"], "profile-token")
+        self.assertEqual(env["TELEGRAM_RELAY_SECRET"], "shared-relay")
+        self.assertEqual(env["TELEGRAM_RELAY_PORT"], "8789")
+        self.assertEqual(env["SPARK_TELEGRAM_PROFILE"], "qa-bot")
+
+    def test_next_telegram_profile_relay_port_skips_existing_ports(self) -> None:
+        setup_state = {"telegram_profiles": {"qa": {"relay_port": 8789}, "agi": {"relay_port": "8790"}}}
+        self.assertEqual(next_telegram_profile_relay_port(setup_state), 8791)
+
+    def test_telegram_profile_runtime_status_reports_running_profiles(self) -> None:
+        setup_state = {"telegram_profiles": {"qa-bot": {"relay_port": 8789}}}
+        pids = {"spark-telegram-bot:qa-bot": {"pid": 1234}}
+        with patch("spark_cli.cli.pid_is_running", return_value=True):
+            statuses = telegram_profile_runtime_status(setup_state, pids)
+        self.assertEqual(statuses[0]["profile"], "qa-bot")
+        self.assertEqual(statuses[0]["process_key"], "spark-telegram-bot:qa-bot")
+        self.assertEqual(statuses[0]["pid"], 1234)
+        self.assertTrue(statuses[0]["running"])
+        self.assertEqual(statuses[0]["relay_port"], 8789)
+
+    def test_configure_telegram_profile_writes_isolated_env_and_spawner_webhook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "config"
+            state_dir = root / "state"
+            module_config_dir = config_dir / "modules"
+            bot_path = root / "spark-telegram-bot"
+            spawner_path = root / "spawner-ui"
+            bot_path.mkdir()
+            spawner_path.mkdir()
+            bot = Module(
+                name="spark-telegram-bot",
+                path=bot_path,
+                manifest={
+                    "module": {"name": "spark-telegram-bot", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                    "provides": {"capabilities": ["telegram.ingress"]},
+                    "needs": {"secrets": ["telegram.bot_token"]},
+                    "secrets": {"telegram_bot_token": {"env_var": "BOT_TOKEN", "storage": "keychain"}},
+                },
+            )
+            spawner = Module(
+                name="spawner-ui",
+                path=spawner_path,
+                manifest={
+                    "module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"},
+                    "provides": {"capabilities": []},
+                    "config": {"output": ".env"},
+                },
+            )
+            module_config_dir.mkdir(parents=True)
+            (module_config_dir / "spark-telegram-bot.env").write_text(
+                "ADMIN_TELEGRAM_IDS=111\nTELEGRAM_GATEWAY_MODE=polling\nTELEGRAM_RELAY_SECRET=shared\n",
+                encoding="utf-8",
+            )
+            (module_config_dir / "spawner-ui.env").write_text(
+                "MISSION_CONTROL_WEBHOOK_URLS=http://127.0.0.1:8788/spawner-events\nSPAWNER_STATE_DIR=/tmp/state\n",
+                encoding="utf-8",
+            )
+
+            class Args:
+                profile = "qa-bot"
+                bot_token = "profile-token"
+                admin_telegram_ids = "222"
+                telegram_relay_port = 8792
+
+            patches = [
+                patch("spark_cli.cli.CONFIG_DIR", config_dir),
+                patch("spark_cli.cli.STATE_DIR", state_dir),
+                patch("spark_cli.cli.MODULE_CONFIG_DIR", module_config_dir),
+                patch("spark_cli.cli.CONFIG_PATH", state_dir / "setup.json"),
+                patch("spark_cli.cli.SECRETS_INDEX_PATH", config_dir / "secrets_index.json"),
+                patch("spark_cli.cli.SECRETS_FILE_PATH", config_dir / "secrets.local.json"),
+                patch("spark_cli.cli.keychain_available", return_value=False),
+                patch("spark_cli.cli.resolve_installed_modules", return_value={"spark-telegram-bot": bot, "spawner-ui": spawner}),
+            ]
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+                configure_telegram_profile(Args())
+                profile_env = read_generated_env(module_config_dir / "spark-telegram-bot.qa-bot.env")
+                spawner_env = read_generated_env(module_config_dir / "spawner-ui.env")
+                setup_state = load_json(state_dir / "setup.json", {})
+                stored_token = load_json(config_dir / "secrets.local.json", {}).get("telegram.profiles.qa-bot.bot_token")
+
+        self.assertEqual(profile_env["ADMIN_TELEGRAM_IDS"], "222")
+        self.assertEqual(profile_env["TELEGRAM_RELAY_PORT"], "8792")
+        self.assertEqual(profile_env["SPARK_TELEGRAM_PROFILE"], "qa-bot")
+        self.assertNotIn("BOT_TOKEN", profile_env)
+        self.assertIn("http://127.0.0.1:8788/spawner-events", spawner_env["MISSION_CONTROL_WEBHOOK_URLS"])
+        self.assertIn("http://127.0.0.1:8792/spawner-events", spawner_env["MISSION_CONTROL_WEBHOOK_URLS"])
+        self.assertEqual(setup_state["telegram_profiles"]["qa-bot"]["relay_port"], 8792)
+        self.assertEqual(stored_token, "profile-token")
 
     def test_describe_install_risk_lists_commands_and_hooks(self) -> None:
         module = Module(
@@ -738,6 +880,26 @@ class SparkCliTests(unittest.TestCase):
         args = build_parser().parse_args(["setup", "--non-interactive"])
         self.assertEqual(args.bundle, "telegram-starter")
 
+    def test_profile_flags_parse_for_setup_start_stop_restart_and_logs(self) -> None:
+        setup_args = build_parser().parse_args(
+            [
+                "setup",
+                "--non-interactive",
+                "--profile",
+                "qa-bot",
+                "--telegram-relay-port",
+                "8792",
+                "--bot-token",
+                "@env:SPARK_TEST_BOT_TOKEN",
+            ]
+        )
+        self.assertEqual(setup_args.profile, "qa-bot")
+        self.assertEqual(setup_args.telegram_relay_port, 8792)
+        self.assertEqual(build_parser().parse_args(["start", "spark-telegram-bot", "--profile", "qa-bot"]).profile, "qa-bot")
+        self.assertEqual(build_parser().parse_args(["stop", "spark-telegram-bot", "--profile", "qa-bot"]).profile, "qa-bot")
+        self.assertEqual(build_parser().parse_args(["restart", "spark-telegram-bot", "--profile", "qa-bot"]).profile, "qa-bot")
+        self.assertEqual(build_parser().parse_args(["logs", "spark-telegram-bot", "--profile", "qa-bot"]).profile, "qa-bot")
+
     def test_setup_accepts_role_specific_llm_providers(self) -> None:
         args = build_parser().parse_args(
             [
@@ -1064,6 +1226,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("signed-in Codex CLI", output)
         self.assertIn("spark autostart install --now", output)
         self.assertIn("spark start telegram-starter", output)
+        self.assertIn("Optional: run another Telegram bot", output)
+        self.assertIn("spark start spark-telegram-bot --profile qa-bot", output)
         self.assertIn("/diagnose", output)
         self.assertIn("/run <goal>", output)
         self.assertIn("spark secrets list", output)
@@ -1076,6 +1240,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(payload["title"], "Spark starter guide")
         self.assertIn("starter_bundle", payload)
         self.assertIn("telegram_commands", payload)
+        self.assertIn("multi_bot_profiles", payload)
         self.assertIn("Windows PowerShell/CMD", payload["operating_systems"])
         self.assertEqual(
             [item["role"] for item in payload["setup"]["llm_roles"]],
