@@ -3618,6 +3618,15 @@ def tail_log_lines(path: Path, line_count: int) -> list[str]:
     return lines[-line_count:]
 
 
+def console_safe_text(text: str, encoding: str | None = None) -> str:
+    output_encoding = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(output_encoding, errors="replace").decode(output_encoding, errors="replace")
+
+
+def write_console_text(text: str) -> None:
+    sys.stdout.write(console_safe_text(text))
+
+
 def follow_log_file(path: Path) -> None:
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         handle.seek(0, os.SEEK_END)
@@ -3627,7 +3636,7 @@ def follow_log_file(path: Path) -> None:
                 if not chunk:
                     time.sleep(0.5)
                     continue
-                sys.stdout.write(chunk)
+                write_console_text(chunk)
                 sys.stdout.flush()
         except KeyboardInterrupt:
             return
@@ -3959,7 +3968,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
         print("Start the module first with `spark start`.")
         return 1
     for line in tail_log_lines(path, args.lines):
-        sys.stdout.write(line if line.endswith("\n") else line + "\n")
+        write_console_text(line if line.endswith("\n") else line + "\n")
     if args.follow:
         follow_log_file(path)
     return 0

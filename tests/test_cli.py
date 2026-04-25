@@ -26,6 +26,7 @@ from spark_cli.cli import (
     collect_telegram_fix_payload,
     collect_verify_payload,
     cmd_setup,
+    console_safe_text,
     CONFIG_PATH,
     detect_runtime_binary,
     evaluate_module_health,
@@ -1819,6 +1820,9 @@ class SparkCliTests(unittest.TestCase):
         if detached:
             self.assertFalse(flags & detached)
         self.assertIsInstance(flags, int)
+
+    def test_console_safe_text_replaces_unsupported_terminal_characters(self) -> None:
+        self.assertEqual(console_safe_text("dotenv tip: 🔄", encoding="cp1252"), "dotenv tip: ?")
 
     def test_start_module_allows_boot_warning_when_process_keeps_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
