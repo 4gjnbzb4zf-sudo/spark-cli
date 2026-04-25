@@ -132,6 +132,23 @@ set "PATH=$NodeDir;%PATH%"
     Write-SparkLog "Wrote wrapper $wrapper"
 }
 
+function Add-SparkBinToUserPath {
+    $binDir = Join-Path $Script:SparkPrefix "bin"
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $parts = @($userPath -split ";" | Where-Object { $_ -and $_.Trim() })
+    $alreadyPresent = $parts | Where-Object { $_.TrimEnd("\") -ieq $binDir.TrimEnd("\") } | Select-Object -First 1
+    if (-not $alreadyPresent) {
+        $newPath = (($binDir) + ";" + ($parts -join ";")).TrimEnd(";")
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        $env:PATH = "$binDir;$env:PATH"
+        Write-SparkLog "Added $binDir to your user PATH"
+        Write-SparkLog "Open a new terminal before running `spark` by name."
+    } else {
+        $env:PATH = "$binDir;$env:PATH"
+        Write-SparkLog "$binDir is already on your user PATH"
+    }
+}
+
 function Run-Setup {
     param([string]$CliDir)
     if ($SkipSetup) {
@@ -188,15 +205,22 @@ Write-SparkLog "Node runtime: $(& (Join-Path $nodeDir "node.exe") -v)"
 $cliDir = Checkout-Cli
 $venvDir = Install-CliVenv -CliDir $cliDir
 Write-Wrapper -NodeDir $nodeDir -VenvDir $venvDir
+Add-SparkBinToUserPath
 Run-Setup -CliDir $cliDir
 Run-Autostart
 Write-SparkLog "Done."
 Write-Host ""
 Write-Host "Spark command:"
+Write-Host "  spark --help"
+Write-Host "  spark guide"
+Write-Host ""
+Write-Host "Direct wrapper path:"
 Write-Host "  $Script:SparkPrefix\bin\spark.cmd --help"
 Write-Host "  $Script:SparkPrefix\bin\spark.cmd guide"
 Write-Host ""
+Write-Host "If `spark` is not found in this terminal yet, close and reopen the terminal."
+Write-Host ""
 Write-Host "Operational checks:"
-Write-Host "  $Script:SparkPrefix\bin\spark.cmd status"
-Write-Host "  $Script:SparkPrefix\bin\spark.cmd autostart status"
-Write-Host "  $Script:SparkPrefix\bin\spark.cmd logs spark-telegram-bot"
+Write-Host "  spark status"
+Write-Host "  spark autostart status"
+Write-Host "  spark logs spark-telegram-bot"
