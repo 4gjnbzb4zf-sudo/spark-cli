@@ -50,6 +50,7 @@ from spark_cli.cli import (
     normalize_git_url,
     pull_module_source,
     remove_tree,
+    remove_windows_path_entry,
     install_module_record,
     keychain_account,
     keychain_env_for_module,
@@ -1405,6 +1406,18 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("Microsoft", path_text)
             self.assertIn("Startup", path_text)
             self.assertTrue(path_text.endswith("spark-telegram-agent.cmd"))
+
+    def test_remove_windows_path_entry_prunes_spark_bin_case_insensitively(self) -> None:
+        new_path, removed = remove_windows_path_entry(
+            r"C:\Tools;C:\Users\Example\.spark\bin\;C:\Windows",
+            Path(r"c:\users\example\.spark\bin"),
+        )
+        self.assertTrue(removed)
+        self.assertEqual(new_path, r"C:\Tools;C:\Windows")
+
+    def test_uninstall_accepts_windows_path_cleanup_flag(self) -> None:
+        args = build_parser().parse_args(["uninstall", "--remove-user-path"])
+        self.assertTrue(args.remove_user_path)
 
     def test_guide_prints_normie_onboarding_surface(self) -> None:
         args = build_parser().parse_args(["guide"])

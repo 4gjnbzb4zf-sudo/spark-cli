@@ -367,6 +367,46 @@ def default_spark_home() -> Path:
     return Path.home().joinpath(".spark").expanduser()
 
 
+def split_windows_path_entries(path_value: str | None) -> list[str]:
+    return [part for part in (path_value or "").split(";") if part and part.strip()]
+
+
+def remove_windows_path_entry(path_value: str | None, entry: Path) -> tuple[str, bool]:
+    target = str(entry).rstrip("\\/").casefold()
+    kept: list[str] = []
+    removed = False
+    for part in split_windows_path_entries(path_value):
+        if part.strip().rstrip("\\/").casefold() == target:
+            removed = True
+            continue
+        kept.append(part)
+    return ";".join(kept), removed
+
+
+def remove_spark_bin_from_windows_user_path(spark_home: Path = SPARK_HOME) -> bool:
+    bin_dir = spark_home / "bin"
+    user_path = os.environ.get("Path", "")
+    if sys.platform == "win32":
+        try:
+            import winreg  # type: ignore
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ) as key:
+                user_path, _ = winreg.QueryValueEx(key, "Path")
+        except (OSError, ImportError):
+            user_path = os.environ.get("Path", "")
+    new_path, removed = remove_windows_path_entry(user_path, bin_dir)
+    if removed and sys.platform == "win32":
+        os.environ["Path"] = new_path
+        try:
+            import winreg  # type: ignore
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+        except (OSError, ImportError) as exc:
+            raise SystemExit(f"Could not update Windows user PATH: {exc}") from exc
+    return removed
+
+
 def keychain_namespace() -> str:
     try:
         raw = str(SPARK_HOME.resolve()).lower()
@@ -5301,6 +5341,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     modules = resolve_installed_target_modules(args.target)
     if not modules:
         print("No installed Spark modules recorded.")
+        if getattr(args, "remove_user_path", False):
+            removed = remove_spark_bin_from_windows_user_path()
+            print("Removed Spark bin from Windows user PATH." if removed else "Spark bin was not present in Windows user PATH.")
         return 0
     installed_modules = resolve_installed_modules()
     blockers = detect_uninstall_blockers(modules, installed_modules)
@@ -5327,6 +5370,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         removed_names.append(module.name)
         print(f"Uninstalled {module.name}")
     update_setup_state_after_uninstall(removed_names)
+    if getattr(args, "remove_user_path", False):
+        removed = remove_spark_bin_from_windows_user_path()
+        print("Removed Spark bin from Windows user PATH." if removed else "Spark bin was not present in Windows user PATH.")
     return 0
 
 
@@ -5603,6 +5649,7 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove installed modules from Spark state and generated config")
     uninstall_parser.add_argument("target", nargs="?")
     uninstall_parser.add_argument("--force", action="store_true")
+    uninstall_parser.add_argument("--remove-user-path", action="store_true", help="Remove Spark bin from the Windows user PATH after uninstall")
     uninstall_parser.set_defaults(func=cmd_uninstall)
 
     start_parser = subparsers.add_parser("start", help="Start startable modules")
