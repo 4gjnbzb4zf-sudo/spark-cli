@@ -42,6 +42,7 @@ from spark_cli.cli import (
     fetch_secret,
     infer_module_name_from_url,
     initialize_builder_runtime_home,
+    install_command_argv,
     git_command,
     is_git_source,
     module_is_git_managed,
@@ -2922,6 +2923,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("-m pip install -e .", uv_rewritten)
         self.assertNotIn("uv pip", uv_rewritten)
 
+    def test_install_command_argv_rejects_shell_metacharacter_chains(self) -> None:
+        with self.assertRaises(SystemExit):
+            install_command_argv("python -m pip install -e . && node evil.js")
+
+    def test_install_command_argv_allowlists_package_managers(self) -> None:
+        with self.assertRaises(SystemExit):
+            install_command_argv("cmd /c echo unsafe")
+        self.assertEqual(install_command_argv("npm ci"), ["npm", "ci"])
+
     def test_execute_install_commands_uses_managed_python_for_python_commands(self) -> None:
         module = Module(
             name="managed-python",
@@ -2931,18 +2941,18 @@ class SparkCliTests(unittest.TestCase):
                 "install": {"dev": {"commands": ["python -m pip install -e ."]}},
             },
         )
-        captured: list[str] = []
+        captured: list[list[str]] = []
 
-        def fake_run_shell(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
-            captured.append(command)
-            return subprocess.CompletedProcess(command, 0, "", "")
+        def fake_run_install_command(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+            argv = install_command_argv(command)
+            captured.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
 
-        with patch("spark_cli.cli.run_shell", fake_run_shell):
+        with patch("spark_cli.cli.run_install_command", fake_run_install_command):
             execute_install_commands(module)
 
         self.assertEqual(len(captured), 1)
-        self.assertIn(str(Path(sys.executable)), captured[0])
-        self.assertIn("-m pip install -e .", captured[0])
+        self.assertEqual(captured[0][:4], [str(Path(sys.executable)), "-m", "pip", "install"])
 
     def test_detect_runtime_binary_reports_absent_for_missing_tool(self) -> None:
         info = detect_runtime_binary("definitely-not-a-real-tool-xyz")
@@ -3697,9 +3707,7 @@ class SparkCliTests(unittest.TestCase):
                     "module": {"name": "test-module", "version": "0.1.0", "kind": "service", "plane": "execution"},
                     "install": {
                         "dev": {
-                            "commands": [
-                                f'python -c "from pathlib import Path; Path(r\'{marker_path}\').write_text(\'ok\', encoding=\'utf-8\')"'
-                            ]
+                            "commands": [f"python -c \"open('{marker_path.as_posix()}', 'w', encoding='utf-8').write('ok')\""]
                         }
                     },
                 },

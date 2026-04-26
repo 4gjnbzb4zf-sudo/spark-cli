@@ -2267,7 +2267,7 @@ def install_modules(modules: list[Module]) -> None:
 def execute_install_commands(module: Module) -> None:
     for command in module.install_commands:
         print(f"Running install command for {module.name}: {command}")
-        result = run_shell(command_with_managed_python(command), module.path)
+        result = run_install_command(command, module.path)
         if result.returncode != 0:
             raise SystemExit(
                 f"{module.name} install command failed: {summarize_command_output(result)}"
@@ -2887,31 +2887,48 @@ def run_shell(
         return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
 
 
-def quote_managed_python() -> str:
-    python_path = str(Path(sys.executable))
-    if os.name == "nt":
-        return subprocess.list2cmdline([python_path])
-    return shlex.quote(python_path)
-
-
 def command_with_managed_python(command: str) -> str:
-    stripped = command.lstrip()
-    leading = command[: len(command) - len(stripped)]
-    managed_python = quote_managed_python()
-    rewrites = (
-        ("uv pip install", f"{managed_python} -m pip install"),
-        ("uv pip ", f"{managed_python} -m pip "),
-        ("python -m pip", f"{managed_python} -m pip"),
-        ("python3 -m pip", f"{managed_python} -m pip"),
-        ("pip ", f"{managed_python} -m pip "),
-        ("pip3 ", f"{managed_python} -m pip "),
-        ("python ", f"{managed_python} "),
-        ("python3 ", f"{managed_python} "),
+    return subprocess.list2cmdline(install_command_argv(command))
+
+
+def install_command_argv(command: str) -> list[str]:
+    parts = shlex.split(command, posix=True)
+    if not parts:
+        raise SystemExit("Install command cannot be empty.")
+    if any(part in {"&&", "||", ";", "|", ">", ">>", "<"} for part in parts):
+        raise SystemExit("Install commands must be a single argv command, not a shell command chain.")
+    executable = parts[0].lower()
+    if executable in {"python", "python3"}:
+        return [str(Path(sys.executable)), *parts[1:]]
+    if executable in {"pip", "pip3"}:
+        return [str(Path(sys.executable)), "-m", "pip", *parts[1:]]
+    if executable == "uv" and len(parts) >= 2 and parts[1] == "pip":
+        return [str(Path(sys.executable)), "-m", "pip", *parts[2:]]
+    if executable == "npm":
+        return parts
+    raise SystemExit(
+        "Unsupported install command executable. Allowed install commands must start with "
+        "python, python3, pip, pip3, uv pip, or npm."
     )
-    for source, replacement in rewrites:
-        if stripped == source.rstrip() or stripped.startswith(source):
-            return leading + replacement + stripped[len(source):]
-    return command
+
+
+def run_install_command(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    argv = install_command_argv(command)
+    try:
+        return subprocess.run(
+            argv,
+            cwd=str(cwd),
+            shell=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=shell_command_env(),
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout if isinstance(error.stdout, str) else ""
+        stderr = error.stderr if isinstance(error.stderr, str) else ""
+        return subprocess.CompletedProcess(argv, 124, stdout=stdout, stderr=stderr)
 
 
 def summarize_command_output(result: subprocess.CompletedProcess[str]) -> str:
