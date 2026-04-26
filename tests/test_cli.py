@@ -55,6 +55,7 @@ from spark_cli.cli import (
     remove_tree,
     remove_windows_path_entry,
     purge_spark_home,
+    resolve_install_executable,
     install_module_record,
     keychain_account,
     keychain_env_for_module,
@@ -86,6 +87,7 @@ from spark_cli.cli import (
     load_install_progress,
     record_install_failure,
     record_install_step,
+    run_install_command,
     run_install_commands_with_progress,
     setup_should_run_install_commands,
     step_previously_completed,
@@ -3062,7 +3064,22 @@ class SparkCliTests(unittest.TestCase):
     def test_install_command_argv_allowlists_package_managers(self) -> None:
         with self.assertRaises(SystemExit):
             install_command_argv("cmd /c echo unsafe")
-        self.assertEqual(install_command_argv("npm ci"), ["npm", "ci"])
+        with patch("spark_cli.cli.shutil.which", return_value="C:/node/npm.CMD"):
+            self.assertEqual(install_command_argv("npm ci"), ["C:/node/npm.CMD", "ci"])
+
+    def test_resolve_install_executable_reports_missing_tool_cleanly(self) -> None:
+        with patch("spark_cli.cli.shutil.which", return_value=None):
+            with self.assertRaises(SystemExit) as error:
+                resolve_install_executable("npm")
+        self.assertIn("Missing required install tool `npm`", str(error.exception))
+
+    def test_run_install_command_returns_clean_failure_when_process_cannot_start(self) -> None:
+        with patch("spark_cli.cli.install_command_argv", return_value=["C:/missing/npm.cmd", "ci"]), \
+             patch("spark_cli.cli.subprocess.run", side_effect=FileNotFoundError("missing")):
+            result = run_install_command("npm ci", Path.cwd())
+
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("Could not start install command `npm ci`", result.stderr)
 
     def test_execute_install_commands_uses_managed_python_for_python_commands(self) -> None:
         module = Module(
@@ -3991,6 +4008,32 @@ class SparkCliTests(unittest.TestCase):
         stop.assert_called_once_with("spawner-ui", 12345)
         save.assert_called_once_with({})
         install.assert_called_once_with(module)
+
+    def test_cmd_update_does_not_stop_processes_when_git_pull_fails(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"}
+            },
+        )
+
+        class Args:
+            target = "spawner-ui"
+            skip_install_commands = False
+
+        with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[module]), \
+             patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.module_is_git_managed", return_value=True), \
+             patch("spark_cli.cli.pull_module_source", return_value=(False, "Aborting")), \
+             patch("spark_cli.cli.stop_tracked_process_key") as stop, \
+             patch("spark_cli.cli.execute_install_commands") as install, \
+             patch("spark_cli.cli.run_module_hook") as hook:
+            self.assertEqual(cmd_update(Args()), 1)
+
+        stop.assert_not_called()
+        install.assert_not_called()
+        hook.assert_not_called()
 
     def test_cmd_update_stops_all_profiled_module_processes(self) -> None:
         module = Module(

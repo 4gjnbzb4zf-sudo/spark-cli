@@ -3175,6 +3175,21 @@ def command_with_managed_python(command: str) -> str:
     return subprocess.list2cmdline(install_command_argv(command))
 
 
+def resolve_install_executable(name: str) -> str:
+    path = shutil.which(name)
+    if path:
+        return path
+    if os.name == "nt" and not name.lower().endswith((".exe", ".cmd", ".bat", ".ps1")):
+        for suffix in (".cmd", ".exe", ".bat"):
+            path = shutil.which(name + suffix)
+            if path:
+                return path
+    raise SystemExit(
+        f"Missing required install tool `{name}`. Install it, reopen the terminal, then rerun the command. "
+        "For Node modules, install Node.js 22+ or rerun Spark's installer with managed Node enabled."
+    )
+
+
 def install_command_argv(command: str) -> list[str]:
     parts = shlex.split(command, posix=True)
     if not parts:
@@ -3189,7 +3204,7 @@ def install_command_argv(command: str) -> list[str]:
     if executable == "uv" and len(parts) >= 2 and parts[1] == "pip":
         return [str(Path(sys.executable)), "-m", "pip", *parts[2:]]
     if executable == "npm":
-        return parts
+        return [resolve_install_executable("npm"), *parts[1:]]
     raise SystemExit(
         "Unsupported install command executable. Allowed install commands must start with "
         "python, python3, pip, pip3, uv pip, or npm."
@@ -3213,6 +3228,13 @@ def run_install_command(command: str, cwd: Path) -> subprocess.CompletedProcess[
         stdout = error.stdout if isinstance(error.stdout, str) else ""
         stderr = error.stderr if isinstance(error.stderr, str) else ""
         return subprocess.CompletedProcess(argv, 124, stdout=stdout, stderr=stderr)
+    except OSError as error:
+        return subprocess.CompletedProcess(
+            argv,
+            127,
+            stdout="",
+            stderr=f"Could not start install command `{command}`: {error.__class__.__name__}. Check that the required tool is installed and on PATH.",
+        )
 
 
 def summarize_command_output(result: subprocess.CompletedProcess[str]) -> str:
@@ -5488,6 +5510,17 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 0
     print_install_summary(modules)
     for module in modules:
+        if module_is_git_managed(module.path):
+            ok, detail = pull_module_source(module.path)
+            print(f"git pull {module.name}: {'ok' if ok else 'failed'} - {detail}")
+            if not ok:
+                print(f"Update stopped before touching running processes for {module.name}.")
+                print(
+                    "Repair: inspect local changes with "
+                    f"`git -C \"{module.path}\" status --short`, then commit/stash them "
+                    "or reinstall once the module source is clean."
+                )
+                return 1
         with pid_file_lock():
             pids = load_pids()
             process_keys = tracked_process_keys_for_module(pids, module.name)
@@ -5498,11 +5531,6 @@ def cmd_update(args: argparse.Namespace) -> int:
             if pid and pid_is_running(pid):
                 print(f"Stopping {process_key} before update so install commands can replace locked files.")
             stop_tracked_process_key(process_key)
-        if module_is_git_managed(module.path):
-            ok, detail = pull_module_source(module.path)
-            print(f"git pull {module.name}: {'ok' if ok else 'failed'} - {detail}")
-            if not ok and not args.skip_install_commands:
-                raise SystemExit(f"Aborting update for {module.name} after git pull failure.")
         if not args.skip_install_commands:
             execute_install_commands(module)
         run_module_hook(module, "post_install")
