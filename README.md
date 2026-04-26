@@ -177,7 +177,7 @@ spark fix telegram
 
 It checks the starter install, Telegram module health, BotFather token, admin allowlist, Builder bridge, LLM roles, supervised process state, and the next log/status commands to run.
 
-### Extra Telegram Bot Profiles
+### Named Telegram Bot Profiles
 
 You can run more than one Telegram bot on the same Spark install for QA, practice, or separate surfaces. Do not start the old direct Builder gateway for this; every live bot should run through `spark-telegram-bot` so conversation, memory suppression, Builder, and Spawner behavior stays consistent.
 
@@ -188,6 +188,8 @@ spark logs spark-telegram-bot --profile qa-bot
 ```
 
 Profile setup creates a separate generated env file, local relay port, pid, and log file for the extra bot. Profiles share the same Builder home, memory chip, LLM role configuration, and Spawner UI by default.
+
+`spark status` marks the primary bot profile and manual profiles. Spark AGI should be the primary profile for the main bot. Secondary tester profiles should stay manual unless you intentionally want them to autostart.
 
 For a fuller launch-readiness proof, run:
 
@@ -299,11 +301,11 @@ Use `spark <cmd> --help` for full flags.
 | `spark init <name>` | Scaffold a new module |
 | `spark install <target>` | Install by registry name, bundle, local path, or git URL |
 | `spark setup [bundle]` | Interactive preflight and secret prompts for a bundle; defaults to `telegram-starter` |
-| `spark setup --profile <name>` | Add a second Telegram bot profile without replacing the default bot |
+| `spark setup --profile <name>` | Add a named Telegram bot profile |
 | `spark update [target]` | Re-run install commands and pull managed git clones |
 | `spark uninstall [target]` | Stop, remove generated env, delete clone, and rotate secrets |
 | `spark start [target]` | Topological launch using `needs.modules` order |
-| `spark start spark-telegram-bot --profile <name>` | Start one extra Telegram bot profile |
+| `spark start spark-telegram-bot --profile <name>` | Start one named Telegram bot profile |
 | `spark stop [target]` | Reverse-topological stop |
 | `spark autostart install --now` | Start Spark now and automatically at computer login |
 | `spark autostart status` | Show whether the login hook is installed |

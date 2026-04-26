@@ -51,6 +51,7 @@ from spark_cli.cli import (
     install_module_record,
     keychain_account,
     keychain_env_for_module,
+    keychain_env_for_telegram_profile,
     list_stored_secrets,
     load_json,
     long_path_aware,
@@ -60,6 +61,7 @@ from spark_cli.cli import (
     module_secret_env_bindings,
     next_telegram_profile_relay_port,
     normalize_telegram_profile,
+    primary_telegram_profile,
     check_runtime_version_for_module,
     clear_install_progress,
     coerce_config_value,
@@ -142,9 +144,11 @@ from spark_cli.cli import (
     resolve_stop_module_names,
     render_launch_agent_plist,
     render_systemd_autostart_unit,
+    autostart_telegram_profiles,
     autostart_shell_command,
     autostart_shell_commands,
     windows_cmd_c,
+    telegram_profiles_to_start_by_default,
     linux_autostart_path,
     systemctl_command,
     spark_invocation_args,
@@ -306,12 +310,47 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(env["TELEGRAM_RELAY_PORT"], "8789")
         self.assertEqual(env["SPARK_TELEGRAM_PROFILE"], "qa-bot")
 
+    def test_default_profile_can_use_profile_secret_convention(self) -> None:
+        def fake_fetch_secret(secret_id: str) -> str | None:
+            values = {
+                "telegram.profiles.default.bot_token": "default-profile-token",
+                "telegram.profiles.default.relay_secret": "default-profile-relay",
+            }
+            return values.get(secret_id)
+
+        with patch("spark_cli.cli.fetch_secret", side_effect=fake_fetch_secret):
+            env = keychain_env_for_telegram_profile("default")
+
+        self.assertEqual(env["BOT_TOKEN"], "default-profile-token")
+        self.assertEqual(env["TELEGRAM_RELAY_SECRET"], "default-profile-relay")
+
+    def test_primary_telegram_profile_prefers_configured_primary(self) -> None:
+        setup_state = {
+            "primary_telegram_profile": "qa-bot",
+            "telegram_profiles": {
+                "spark-agi": {"relay_port": 8789},
+                "qa-bot": {"relay_port": 8790},
+            },
+        }
+
+        self.assertEqual(primary_telegram_profile(setup_state), "qa-bot")
+
+    def test_primary_telegram_profile_prefers_spark_agi_when_present(self) -> None:
+        setup_state = {
+            "telegram_profiles": {
+                "qa-bot": {"relay_port": 8790},
+                "spark-agi": {"relay_port": 8789},
+            }
+        }
+
+        self.assertEqual(primary_telegram_profile(setup_state), "spark-agi")
+
     def test_next_telegram_profile_relay_port_skips_existing_ports(self) -> None:
         setup_state = {"telegram_profiles": {"qa": {"relay_port": 8789}, "agi": {"relay_port": "8790"}}}
         self.assertEqual(next_telegram_profile_relay_port(setup_state), 8791)
 
     def test_telegram_profile_runtime_status_reports_running_profiles(self) -> None:
-        setup_state = {"telegram_profiles": {"qa-bot": {"relay_port": 8789}}}
+        setup_state = {"primary_telegram_profile": "qa-bot", "telegram_profiles": {"qa-bot": {"relay_port": 8789}}}
         pids = {"spark-telegram-bot:qa-bot": {"pid": 1234}}
         with patch("spark_cli.cli.pid_is_running", return_value=True):
             statuses = telegram_profile_runtime_status(setup_state, pids)
@@ -320,6 +359,24 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(statuses[0]["pid"], 1234)
         self.assertTrue(statuses[0]["running"])
         self.assertEqual(statuses[0]["relay_port"], 8789)
+        self.assertTrue(statuses[0]["primary"])
+        self.assertTrue(statuses[0]["autostart"])
+
+    def test_telegram_profile_runtime_status_marks_manual_profiles(self) -> None:
+        setup_state = {
+            "primary_telegram_profile": "spark-agi",
+            "telegram_profiles": {
+                "spark-agi": {"relay_port": 8789},
+                "tester": {"relay_port": 8790, "autostart": False},
+            },
+        }
+
+        statuses = telegram_profile_runtime_status(setup_state, {})
+
+        self.assertTrue(statuses[0]["primary"])
+        self.assertTrue(statuses[0]["autostart"])
+        self.assertFalse(statuses[1]["primary"])
+        self.assertFalse(statuses[1]["autostart"])
 
     def test_configure_telegram_profile_writes_isolated_env_and_spawner_webhook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -390,6 +447,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8788/spawner-events", spawner_env["MISSION_CONTROL_WEBHOOK_URLS"])
         self.assertIn("http://127.0.0.1:8792/spawner-events", spawner_env["MISSION_CONTROL_WEBHOOK_URLS"])
         self.assertEqual(setup_state["telegram_profiles"]["qa-bot"]["relay_port"], 8792)
+        self.assertEqual(setup_state["primary_telegram_profile"], "qa-bot")
         self.assertEqual(stored_token, "profile-token")
 
     def test_describe_install_risk_lists_commands_and_hooks(self) -> None:
@@ -909,6 +967,7 @@ class SparkCliTests(unittest.TestCase):
                                 "secret_id": "telegram.profiles.spark-agi.bot_token",
                             }
                         },
+                        "primary_telegram_profile": "spark-agi",
                     }
                 ),
                 encoding="utf-8",
@@ -933,6 +992,7 @@ class SparkCliTests(unittest.TestCase):
                 )
 
         self.assertEqual(setup_state["telegram_profiles"]["spark-agi"]["relay_port"], 8789)
+        self.assertEqual(setup_state["primary_telegram_profile"], "spark-agi")
         self.assertIn("telegram.profiles.spark-agi.bot_token", setup_state["secret_keys"])
         self.assertIn("telegram.bot_token", setup_state["secret_keys"])
 
@@ -1161,6 +1221,31 @@ class SparkCliTests(unittest.TestCase):
                     "/tmp/spark stop telegram-starter",
                 ],
             )
+
+    def test_autostart_telegram_profiles_skips_manual_profiles(self) -> None:
+        setup_state = {
+            "telegram_profiles": {
+                "spark-agi": {"relay_port": 8789},
+                "tester": {"relay_port": 8790, "autostart": False},
+            }
+        }
+
+        with patch("spark_cli.cli.load_json", return_value=setup_state):
+            self.assertEqual(autostart_telegram_profiles(), ["spark-agi"])
+
+    def test_default_start_profiles_do_not_fall_back_when_all_profiles_are_manual(self) -> None:
+        setup_state = {
+            "telegram_profiles": {
+                "tester": {"relay_port": 8790, "autostart": False},
+            }
+        }
+
+        with patch("spark_cli.cli.load_json", return_value=setup_state):
+            self.assertEqual(telegram_profiles_to_start_by_default(), [])
+
+    def test_default_start_profiles_use_compatibility_default_without_profiles(self) -> None:
+        with patch("spark_cli.cli.load_json", return_value={}):
+            self.assertEqual(telegram_profiles_to_start_by_default(), ["default"])
 
     def test_windows_cmd_c_wraps_chained_autostart_command(self) -> None:
         wrapped = windows_cmd_c(r"C:\Spark\spark.cmd start telegram-starter && C:\Spark\spark.cmd start spark-telegram-bot")
@@ -2560,7 +2645,12 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spawner-ui (pid 102)", detail)
 
     def test_expected_runtime_process_names_includes_telegram_profiles(self) -> None:
-        setup_state = {"telegram_profiles": {"spark-agi": {"relay_port": 8789}}}
+        setup_state = {
+            "telegram_profiles": {
+                "spark-agi": {"relay_port": 8789},
+                "tester": {"relay_port": 8790, "autostart": False},
+            }
+        }
 
         self.assertEqual(
             expected_runtime_process_names({"spark-telegram-bot", "spawner-ui"}, setup_state),
