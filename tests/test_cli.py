@@ -107,7 +107,9 @@ from spark_cli.cli import (
     execute_install_commands,
     expand_targets,
     expected_runtime_process_names,
+    discover_runtime_pid,
     generated_module_env_path,
+    listening_pid_for_tcp_port,
     remove_managed_env_block,
     pid_is_running,
     print_install_summary,
@@ -887,6 +889,50 @@ class SparkCliTests(unittest.TestCase):
         args = build_parser().parse_args(["setup", "--non-interactive"])
         self.assertEqual(args.bundle, "telegram-starter")
 
+    def test_collect_setup_configuration_preserves_telegram_profiles_on_default_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            config_path = tmp / "setup.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "secret_keys": [
+                            "telegram.bot_token",
+                            "telegram.profiles.spark-agi.bot_token",
+                        ],
+                        "telegram_profiles": {
+                            "spark-agi": {
+                                "relay_port": 8789,
+                                "secret_id": "telegram.profiles.spark-agi.bot_token",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = build_parser().parse_args(["setup", "--non-interactive"])
+            gateway = make_module(
+                "spark-telegram-bot",
+                ["telegram.ingress"],
+                ["telegram.bot_token", "telegram.admin_ids"],
+            )
+
+            with patch("spark_cli.cli.CONFIG_PATH", config_path), \
+                 patch("spark_cli.cli.collect_secret_values", return_value={"telegram.bot_token": "token"}), \
+                 patch("spark_cli.cli.ensure_generated_setup_secrets", return_value={"telegram.bot_token": "token"}), \
+                 patch("spark_cli.cli.build_llm_env", return_value=("zai", {"ZAI_API_KEY": "key", "ZAI_MODEL": "glm-5.1"})), \
+                 patch("spark_cli.cli.spark_builder_home", return_value=tmp / "state" / "spark-intelligence"):
+                _, setup_state = collect_setup_configuration(
+                    args,
+                    [gateway],
+                    gateway,
+                    interactive=False,
+                )
+
+        self.assertEqual(setup_state["telegram_profiles"]["spark-agi"]["relay_port"], 8789)
+        self.assertIn("telegram.profiles.spark-agi.bot_token", setup_state["secret_keys"])
+        self.assertIn("telegram.bot_token", setup_state["secret_keys"])
+
     def test_profile_flags_parse_for_setup_start_stop_restart_and_logs(self) -> None:
         setup_args = build_parser().parse_args(
             [
@@ -1100,8 +1146,6 @@ class SparkCliTests(unittest.TestCase):
                 autostart_shell_commands("start", "telegram-starter"),
                 [
                     "/tmp/spark start --allow-boot-warnings telegram-starter",
-                    "/tmp/spark start --allow-boot-warnings --profile qa-bot spark-telegram-bot",
-                    "/tmp/spark start --allow-boot-warnings --profile spark-agi spark-telegram-bot",
                 ],
             )
             self.assertEqual(
@@ -1152,6 +1196,7 @@ class SparkCliTests(unittest.TestCase):
                  patch("spark_cli.cli.linux_autostart_scope", return_value="user"), \
                  patch("spark_cli.cli.linux_autostart_path", return_value=service_path), \
                  patch("spark_cli.cli.spark_invocation_args", return_value=["/tmp/spark"]), \
+                 patch("spark_cli.cli.autostart_telegram_profiles", return_value=[]), \
                  patch("spark_cli.cli.run_autostart_helper", side_effect=fake_helper), \
                  patch("sys.stdout", new_callable=StringIO):
                 self.assertEqual(args.func(args), 0)
@@ -1176,6 +1221,7 @@ class SparkCliTests(unittest.TestCase):
             with patch("spark_cli.cli.sys.platform", "darwin"), \
                  patch("spark_cli.cli.macos_autostart_path", return_value=plist_path), \
                  patch("spark_cli.cli.spark_invocation_args", return_value=["/tmp/spark"]), \
+                 patch("spark_cli.cli.autostart_telegram_profiles", return_value=[]), \
                  patch("spark_cli.cli.os.getuid", return_value=501, create=True), \
                  patch("spark_cli.cli.run_autostart_helper", side_effect=fake_helper), \
                  patch("sys.stdout", new_callable=StringIO):
@@ -1752,6 +1798,45 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(args.func(args), 0)
 
         self.assertNotIn("spark-intelligence-builder: no run.default", output.getvalue())
+
+    def test_start_command_uses_default_bot_and_configured_telegram_profiles(self) -> None:
+        spawner = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                "run": {"default": {"command": "npm run dev"}},
+            },
+        )
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"modules": ["spawner-ui"]},
+                "run": {"default": {"command": "npm run dev"}},
+            },
+        )
+        args = build_parser().parse_args(["start", "spark-telegram-bot"])
+        started: list[tuple[str, str | None]] = []
+
+        def fake_start(module: Module, **kwargs: object) -> bool:
+            started.append((module.name, kwargs.get("profile")))  # type: ignore[arg-type]
+            return True
+
+        with patch("spark_cli.cli.resolve_installed_modules", return_value={spawner.name: spawner, gateway.name: gateway}), \
+             patch("spark_cli.cli.load_json", return_value={"telegram_profiles": {"spark-agi": {"relay_port": 8789}}}), \
+             patch("spark_cli.cli.start_module", side_effect=fake_start):
+            self.assertEqual(args.func(args), 0)
+
+        self.assertEqual(
+            started,
+            [
+                ("spawner-ui", "default"),
+                ("spark-telegram-bot", "default"),
+                ("spark-telegram-bot", "spark-agi"),
+            ],
+        )
 
     def test_resolve_stop_module_names_stops_dependents_before_dependency(self) -> None:
         builder = Module(
@@ -2431,6 +2516,12 @@ class SparkCliTests(unittest.TestCase):
             ["spark-telegram-bot", "spawner-ui", "spark-telegram-bot:spark-agi"],
         )
 
+    def test_expected_runtime_process_names_uses_default_bot_without_profiles(self) -> None:
+        self.assertEqual(
+            expected_runtime_process_names({"spark-telegram-bot", "spawner-ui"}, {}),
+            ["spark-telegram-bot", "spawner-ui"],
+        )
+
     def test_tracked_process_keys_for_module_includes_profiled_bots(self) -> None:
         pids = {
             "spark-telegram-bot": {"pid": 101, "module": "spark-telegram-bot"},
@@ -2443,13 +2534,40 @@ class SparkCliTests(unittest.TestCase):
             ["spark-telegram-bot", "spark-telegram-bot:spark-agi"],
         )
 
-    def test_windows_service_creationflags_keeps_stdio_redirectable(self) -> None:
+    def test_windows_service_creationflags_detaches_from_agent_terminal(self) -> None:
         flags = windows_service_creationflags()
         detached = int(getattr(subprocess, "DETACHED_PROCESS", 0))
+        breakaway = int(getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
 
         if detached:
-            self.assertFalse(flags & detached)
+            self.assertTrue(flags & detached)
+        if breakaway:
+            self.assertTrue(flags & breakaway)
         self.assertIsInstance(flags, int)
+
+    def test_listening_pid_for_tcp_port_parses_windows_netstat(self) -> None:
+        netstat = """
+  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       111
+  TCP    127.0.0.1:8788         0.0.0.0:0              LISTENING       222
+"""
+        completed = subprocess.CompletedProcess(["netstat"], 0, stdout=netstat, stderr="")
+
+        with patch("spark_cli.cli.os.name", "nt"), \
+             patch("spark_cli.cli.subprocess.run", return_value=completed):
+            self.assertEqual(listening_pid_for_tcp_port(8788), 222)
+
+    def test_discover_runtime_pid_uses_listener_when_windows_launcher_exits(self) -> None:
+        module = make_module("spark-telegram-bot", ["telegram.ingress"])
+        process = subprocess.Popen.__new__(subprocess.Popen)
+        process.pid = 123
+
+        def fake_pid_is_running(pid: int) -> bool:
+            return pid == 456
+
+        with patch("spark_cli.cli.pid_is_running", side_effect=fake_pid_is_running), \
+             patch("spark_cli.cli.module_runtime_listener_ports", return_value=[8788]), \
+             patch("spark_cli.cli.listening_pid_for_tcp_port", return_value=456):
+            self.assertEqual(discover_runtime_pid(module, process), 456)
 
     def test_console_safe_text_replaces_unsupported_terminal_characters(self) -> None:
         self.assertEqual(console_safe_text("dotenv tip: 🔄", encoding="cp1252"), "dotenv tip: ?")

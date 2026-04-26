@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -2453,20 +2454,25 @@ def collect_setup_configuration(
     interactive: bool,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Collect secrets and LLM choices, then build the persisted setup state."""
+    existing_setup = load_json(CONFIG_PATH, {})
     secret_values = collect_secret_values(args, bundle, interactive=interactive)
     secret_values = ensure_generated_setup_secrets(secret_values, bundle)
     if interactive:
         secret_values = run_llm_provider_wizard(args, secret_values)
     llm_provider, llm_env = build_llm_env(args, secret_values)
+    preserved_secret_keys = set(existing_setup.get("secret_keys", [])) if isinstance(existing_setup, dict) else set()
+    preserved_profiles = existing_setup.get("telegram_profiles") if isinstance(existing_setup, dict) else None
     setup_state = {
         "bundle": args.bundle,
         "modules": [module.name for module in bundle],
         "telegram_ingress_owner": ingress_owner.name,
         "configured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "secret_keys": sorted(secret_values.keys()),
+        "secret_keys": sorted(preserved_secret_keys | set(secret_values.keys())),
         "llm": llm_setup_state(llm_provider, llm_env),
         "builder_home": str(spark_builder_home()),
     }
+    if isinstance(preserved_profiles, dict) and preserved_profiles:
+        setup_state["telegram_profiles"] = preserved_profiles
     return secret_values, setup_state
 
 
@@ -3495,8 +3501,15 @@ def resolve_stop_module_names(target: str | None, installed_modules: dict[str, M
 
     installed_subset = {name: installed_modules[name] for name in stop_names if name in installed_modules}
     ordered_names = [module.name for module in reversed(topologically_sort_modules(installed_subset))]
+    expanded_ordered_names: list[str] = []
+    for name in ordered_names:
+        if name == "spark-telegram-bot":
+            tracked_bot_keys = tracked_process_keys_for_module(tracked_pids, "spark-telegram-bot")
+            expanded_ordered_names.extend(tracked_bot_keys or [name])
+        else:
+            expanded_ordered_names.append(name)
     extra_names = [name for name in stop_names if name not in installed_subset]
-    return ordered_names + sorted(extra_names)
+    return expanded_ordered_names + sorted(extra_names)
 
 
 def resolve_restart_modules(target: str | None, installed_modules: dict[str, Module], tracked_pids: dict[str, Any]) -> list[Module]:
@@ -3700,7 +3713,76 @@ def format_start_warning(module: Module, detail: str, process: subprocess.Popen[
 
 
 def windows_service_creationflags() -> int:
-    return int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return (
+        int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        | int(getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0))
+        | int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    )
+
+
+def listening_pid_for_tcp_port(port: int) -> int | None:
+    if os.name != "nt":
+        return None
+    result = subprocess.run(
+        ["netstat", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    suffix = f":{port}"
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        local_address = parts[1]
+        state = parts[-2].upper()
+        pid_text = parts[-1]
+        if state == "LISTENING" and local_address.endswith(suffix):
+            try:
+                return int(pid_text)
+            except ValueError:
+                return None
+    return None
+
+
+def module_runtime_listener_ports(module: Module, profile: str | None = None) -> list[int]:
+    if module.name == "spark-telegram-bot":
+        raw_port = module_runtime_env(module, profile).get("TELEGRAM_RELAY_PORT", "8788")
+        try:
+            return [int(raw_port)]
+        except (TypeError, ValueError):
+            return [8788]
+    ready_check = module.ready_check or ""
+    if ready_check.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(ready_check)
+        if parsed.port:
+            return [int(parsed.port)]
+    return []
+
+
+def discover_runtime_pid(module: Module, process: subprocess.Popen[Any], profile: str | None = None) -> int:
+    for port in module_runtime_listener_ports(module, profile):
+        pid = listening_pid_for_tcp_port(port)
+        if pid and pid_is_running(pid):
+            return pid
+    if pid_is_running(process.pid):
+        return int(process.pid)
+    return int(process.pid)
+
+
+def update_tracked_runtime_pid(process_key: str, launched_pid: int, runtime_pid: int) -> None:
+    if runtime_pid == launched_pid:
+        return
+    with pid_file_lock():
+        pids = load_pids()
+        record = pids.get(process_key)
+        if isinstance(record, dict) and int(record.get("pid", 0)) == int(launched_pid):
+            record["pid"] = int(runtime_pid)
+            record["launcher_pid"] = int(launched_pid)
+            save_pids(pids)
 
 
 def process_runtime_detail(pids: dict[str, Any], module_names: list[str]) -> tuple[bool, str]:
@@ -3721,11 +3803,11 @@ def process_runtime_detail(pids: dict[str, Any], module_names: list[str]) -> tup
 
 
 def expected_runtime_process_names(installed_names: set[str], setup_state: dict[str, Any]) -> list[str]:
-    names = [
-        name
-        for name in ("spark-telegram-bot", "spawner-ui")
-        if name in installed_names
-    ]
+    names: list[str] = []
+    if "spark-telegram-bot" in installed_names:
+        names.append("spark-telegram-bot")
+    if "spawner-ui" in installed_names:
+        names.append("spawner-ui")
     profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
     if isinstance(profiles, dict) and "spark-telegram-bot" in installed_names:
         for profile, profile_state in sorted(profiles.items()):
@@ -3823,8 +3905,11 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: 
     print(f"Started {display_name} (pid {process.pid})")
     ready, detail = wait_for_ready_check(module, process=process, profile=profile)
     if ready:
+        runtime_pid = discover_runtime_pid(module, process, profile)
+        update_tracked_runtime_pid(process_key, process.pid, runtime_pid)
+        pid_detail = f" pid={runtime_pid}" if runtime_pid == process.pid else f" pid={runtime_pid} launcher_pid={process.pid}"
         print(f"Ready {display_name}: {detail}")
-        append_process_log(module.name, f"ready pid={process.pid} detail={detail}", profile=profile)
+        append_process_log(module.name, f"ready{pid_detail} detail={detail}", profile=profile)
     else:
         warning = format_start_warning(module, detail, process, profile=profile)
         print(f"Start warning for {display_name}: {warning}")
@@ -3856,12 +3941,24 @@ def cmd_start(args: argparse.Namespace) -> int:
             if module.name in requested_names:
                 print(f"Skipping {module.name}: no run.default command declared")
             continue
+        if module.name == "spark-telegram-bot" and profile == DEFAULT_TELEGRAM_PROFILE:
+            if not start_module(
+                module,
+                allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
+                profile=DEFAULT_TELEGRAM_PROFILE,
+            ):
+                exit_code = 1
+            profiles = autostart_telegram_profiles()
+            for telegram_profile in profiles:
+                if not start_module(
+                    module,
+                    allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
+                    profile=telegram_profile,
+                ):
+                    exit_code = 1
+            continue
         module_profile = profile if module.name == "spark-telegram-bot" else DEFAULT_TELEGRAM_PROFILE
-        if not start_module(
-            module,
-            allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
-            profile=module_profile,
-        ):
+        if not start_module(module, allow_boot_warnings=getattr(args, "allow_boot_warnings", False), profile=module_profile):
             exit_code = 1
     return exit_code
 
@@ -3943,6 +4040,22 @@ def cmd_restart(args: argparse.Namespace) -> int:
         if not module.run_command:
             print(f"Skipping {module.name}: no run.default command declared")
             continue
+        if module.name == "spark-telegram-bot":
+            if not start_module(
+                module,
+                allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
+                profile=DEFAULT_TELEGRAM_PROFILE,
+            ):
+                start_code = 1
+            profiles = autostart_telegram_profiles()
+            for telegram_profile in profiles:
+                if not start_module(
+                    module,
+                    allow_boot_warnings=getattr(args, "allow_boot_warnings", False),
+                    profile=telegram_profile,
+                ):
+                    start_code = 1
+            continue
         if not start_module(module, allow_boot_warnings=getattr(args, "allow_boot_warnings", False)):
             start_code = 1
     return start_code or stop_code
@@ -3999,10 +4112,13 @@ def autostart_shell_commands(action: str, target: str) -> list[str]:
     if not autostart_should_include_telegram_profiles(target):
         return [base_command]
 
+    profiles = autostart_telegram_profiles()
     profile_commands = [
         spark_action_shell_command(action, "spark-telegram-bot", profile=profile)
-        for profile in autostart_telegram_profiles()
+        for profile in profiles
     ]
+    if action == "start":
+        return [base_command]
     if action == "stop":
         return profile_commands + [base_command]
     return [base_command] + profile_commands
