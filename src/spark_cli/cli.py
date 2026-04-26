@@ -4074,6 +4074,22 @@ def redact_sensitive_text(value: str) -> str:
     return redacted
 
 
+def redact_shareable_text(value: str) -> str:
+    redacted = redact_sensitive_text(value)
+    home = str(Path.home())
+    if home:
+        redacted = redacted.replace(home, "~")
+        redacted = redacted.replace(home.replace("\\", "/"), "~")
+    spark_home = str(SPARK_HOME)
+    if spark_home:
+        redacted = redacted.replace(spark_home, "~/.spark")
+        redacted = redacted.replace(spark_home.replace("\\", "/"), "~/.spark")
+    redacted = re.sub(r"(?i)\b[A-Z]:[\\/]Users[\\/][^\\/\s]+", "%USERPROFILE%", redacted)
+    redacted = re.sub(r"(?i)\b/Users/[^/\s]+", "$HOME", redacted)
+    redacted = re.sub(r"(?i)\b/home/[^/\s]+", "$HOME", redacted)
+    return redacted
+
+
 def redact_for_llm(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -4131,6 +4147,7 @@ def render_llm_doctor_prompt(context: dict[str, Any]) -> str:
         "- Never ask for or print secrets, tokens, API keys, cookies, private keys, or raw environment dumps.\n"
         "- Do not suggest raw provider API calls that require tokens; prefer Spark CLI repair commands such as `spark fix telegram`, `spark restart`, `spark verify`, and `spark logs`.\n"
         "- Do not recommend publishing logs unless the user has reviewed them.\n"
+        "- Do not include local usernames, private project paths, Telegram ids, chat transcripts, raw logs, or machine-specific secrets in an upstream PR.\n"
         "- Prefer reversible commands and explicit confirmation before destructive actions.\n"
         "- If a fix could help upstream Spark, suggest creating a sanitized PR only after the local fix is understood.\n\n"
         "Engineering rules:\n"
@@ -4299,6 +4316,30 @@ def write_doctor_report(content: str, *, prefix: str = "spark-doctor") -> Path:
     return path
 
 
+def render_upstream_pr_candidate(problem: str, doctor_report: str) -> str:
+    safe_problem = redact_shareable_text(problem).strip() or "Spark doctor repair"
+    safe_report = redact_shareable_text(doctor_report).strip()
+    return (
+        "# Spark Upstream PR Candidate\n\n"
+        "This draft is sanitized for review, not automatically uploaded. Read it before sharing.\n\n"
+        "## Safety Checklist\n"
+        "- [ ] No API keys, bot tokens, secrets, cookies, private keys, or Authorization headers.\n"
+        "- [ ] No personal chat transcripts, private project names, Telegram ids, or local usernames.\n"
+        "- [ ] No raw logs unless they were manually reviewed and minimized.\n"
+        "- [ ] The proposed change is useful for other Spark users, not only this local machine.\n"
+        "- [ ] The PR includes a focused test or verification command.\n\n"
+        "## User-Visible Problem\n"
+        f"{safe_problem}\n\n"
+        "## Doctor Summary To Convert Into A PR\n"
+        f"{safe_report}\n\n"
+        "## Recommended Upstream Shape\n"
+        "- Keep the PR small and focused on one failure class.\n"
+        "- Add or update a unit test that reproduces the failure without real secrets.\n"
+        "- Prefer docs or repair-hint changes when code changes are not needed.\n"
+        "- Do not include this whole doctor report in the PR body; summarize the general bug and the fix.\n"
+    )
+
+
 def cmd_doctor_llm(args: argparse.Namespace) -> int:
     problem = " ".join(getattr(args, "problem", []) or []).strip() or "Spark is not working correctly."
     context = collect_llm_doctor_context(
@@ -4328,6 +4369,17 @@ def cmd_doctor_llm(args: argparse.Namespace) -> int:
     if getattr(args, "save_report", False):
         path = write_doctor_report(report)
         print(f"Saved Spark Doctor report: {path}")
+    if getattr(args, "upstream_report", False):
+        upstream = render_upstream_pr_candidate(problem, report)
+        upstream_out = getattr(args, "upstream_out", None)
+        if upstream_out:
+            upstream_path = Path(upstream_out).expanduser()
+            upstream_path.parent.mkdir(parents=True, exist_ok=True)
+            upstream_path.write_text(upstream, encoding="utf-8")
+        else:
+            upstream_path = write_doctor_report(upstream, prefix="spark-upstream-pr-candidate")
+        print(f"Saved sanitized upstream PR candidate: {upstream_path}")
+        print("Review the checklist before opening a PR. Spark did not upload anything.")
     print(report)
     return 0
 
@@ -6817,6 +6869,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_llm_parser.add_argument("--log-lines", type=int, default=80, help="Number of log lines per module when --include-logs is set")
     doctor_llm_parser.add_argument("--prompt-out", help="Write the redacted prompt to a file instead of calling the LLM")
     doctor_llm_parser.add_argument("--save-report", action="store_true", help="Save the doctor report under ~/.spark/doctor")
+    doctor_llm_parser.add_argument("--upstream-report", action="store_true", help="Write a sanitized upstream PR candidate draft; never uploads automatically")
+    doctor_llm_parser.add_argument("--upstream-out", help="Path for --upstream-report output")
     doctor_llm_parser.set_defaults(func=cmd_doctor)
 
     verify_parser = subparsers.add_parser("verify", help="Verify launch-critical Spark wiring end to end")

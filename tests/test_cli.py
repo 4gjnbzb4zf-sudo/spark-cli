@@ -107,6 +107,7 @@ from spark_cli.cli import (
     parse_version_tuple,
     provider_status_payload,
     redact_for_llm,
+    redact_shareable_text,
     redact_sensitive_text,
     read_clipboard_text,
     read_secret_interactive,
@@ -149,6 +150,7 @@ from spark_cli.cli import (
     read_generated_env,
     resolve_llm_roles,
     resolve_llm_doctor_target,
+    render_upstream_pr_candidate,
     required_runtimes_for_modules,
     render_llm_doctor_prompt,
     resolve_runtime_binary,
@@ -408,13 +410,47 @@ class SparkCliTests(unittest.TestCase):
     def test_llm_doctor_prompt_prefers_spark_repair_commands_over_raw_token_calls(self) -> None:
         prompt = render_llm_doctor_prompt({"problem": "Telegram is quiet", "status": {"ok": False}})
         self.assertIn("Do not suggest raw provider API calls that require tokens", prompt)
+        self.assertIn("Do not include local usernames", prompt)
         self.assertIn("spark fix telegram", prompt)
 
     def test_doctor_llm_parser_accepts_problem_and_prompt_out(self) -> None:
-        args = build_parser().parse_args(["doctor", "llm", "Telegram", "is", "quiet", "--prompt-out", "doctor.md"])
+        args = build_parser().parse_args([
+            "doctor",
+            "llm",
+            "Telegram",
+            "is",
+            "quiet",
+            "--prompt-out",
+            "doctor.md",
+            "--upstream-report",
+            "--upstream-out",
+            "upstream.md",
+        ])
         self.assertEqual(args.doctor_command, "llm")
         self.assertEqual(args.problem, ["Telegram", "is", "quiet"])
         self.assertEqual(args.prompt_out, "doctor.md")
+        self.assertTrue(args.upstream_report)
+        self.assertEqual(args.upstream_out, "upstream.md")
+
+    def test_shareable_doctor_text_removes_tokens_and_home_paths(self) -> None:
+        with patch("spark_cli.cli.Path.home", return_value=Path("C:/Users/Alice")):
+            redacted = redact_shareable_text(
+                "C:/Users/Alice/.spark/modules bot_token=1234567890:AAabcdefghijklmnopqrstuvwxyz1234567890"
+            )
+        self.assertNotIn("Alice", redacted)
+        self.assertNotIn("1234567890:AA", redacted)
+        self.assertIn("~/.spark", redacted)
+
+    def test_upstream_pr_candidate_is_review_first_and_sanitized(self) -> None:
+        draft = render_upstream_pr_candidate(
+            "Telegram failed for C:/Users/Alice/project",
+            "Fix used Authorization: Bearer sk-proj-secretvalue1234567890 in C:/Users/Alice/.spark/logs",
+        )
+        self.assertIn("not automatically uploaded", draft)
+        self.assertIn("Safety Checklist", draft)
+        self.assertNotIn("sk-proj-secretvalue", draft)
+        self.assertNotIn("C:/Users/Alice", draft)
+        self.assertIn("focused test", draft)
 
     def test_resolve_llm_doctor_target_uses_configured_builder_api_key(self) -> None:
         setup_state = {
