@@ -38,6 +38,7 @@ These are hard rules. Do not cross them without a written exception in this doc 
 8. No module over 1,500 lines without an extraction ticket. No file over 3,000 lines without a named owner and refactor plan.
 9. No live repo without `README.md`, `SECURITY.md`, `.gitignore`, tests, and a documented smoke command.
 10. No history rewrite, force-push, destructive temp cleanup, or credential deletion without an explicit approval step.
+11. No Docker requirement for normal Spark setup or runtime. Docker may be used as optional test/sandbox infrastructure only.
 
 ## Session Protocol
 
@@ -76,6 +77,8 @@ End:
 | `spark-researcher` | affected `python -m pytest ...`; adapter command-policy tests for command changes |
 | `spark-character` | affected `python -m pytest ...`; artifact/package data check when persona files move |
 | `spark-agent-site` | installer hardening workflow equivalent: shell syntax, PowerShell parse, checksum validation, Docker build |
+
+Optional Docker workbench checks for `spark-cli` live in `docs/OPTIONAL_DOCKER_WORKBENCH.md`. They are useful for clean install and sandbox experiments, but they must stay manual/opt-in unless a future review intentionally promotes a specific check.
 
 ## Documentation Rewrite Map
 
@@ -135,3 +138,5 @@ Each live repo should get a small required CI workflow with:
 6. Run repo-specific smoke checks.
 
 CI should be boring and strict. If a check is too flaky to require, make it a separate manual workflow and document why.
+
+Docker-based checks should default to manual workflows unless the repo genuinely needs a container to validate production behavior.

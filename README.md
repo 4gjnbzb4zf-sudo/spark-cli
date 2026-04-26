@@ -364,10 +364,30 @@ python -m spark_cli.cli verify --registry-pins --json
 python -m spark_cli.cli verify --provenance --json
 ```
 
+### Optional Docker Workbench
+
+Docker is optional. It is useful for clean testing and sandbox experiments, but it is not required for `spark setup` or normal Spark runtime use.
+
+Clean dev smoke:
+
+```bash
+bash scripts/docker-dev-smoke.sh
+```
+
+Restricted sandbox run:
+
+```bash
+bash scripts/docker-sandbox-run.sh --help
+```
+
+Windows PowerShell wrappers are available at `scripts/docker-dev-smoke.ps1` and `scripts/docker-sandbox-run.ps1`.
+See [docs/OPTIONAL_DOCKER_WORKBENCH.md](./docs/OPTIONAL_DOCKER_WORKBENCH.md) for the full opt-in workflow and safety rules.
+
 ## More Docs
 
 - [docs/SPARK_ECOSYSTEM_LAUNCH.md](./docs/SPARK_ECOSYSTEM_LAUNCH.md) - public launch contract
 - [docs/SPARK_MAINTAINABILITY_GOVERNANCE_2026-04-26.md](./docs/SPARK_MAINTAINABILITY_GOVERNANCE_2026-04-26.md) - cross-repo maintainability rules, redlines, and session protocol
+- [docs/OPTIONAL_DOCKER_WORKBENCH.md](./docs/OPTIONAL_DOCKER_WORKBENCH.md) - optional Docker dev and sandbox workbench
 - [docs/SPARK_NORMIE_ONBOARDING_AND_GATEWAY_TEST.md](./docs/SPARK_NORMIE_ONBOARDING_AND_GATEWAY_TEST.md) - step-by-step install and real-time Telegram gateway test
 - [docs/LAUNCH_RUNBOOK.md](./docs/LAUNCH_RUNBOOK.md) - release-day verification
 - [docs/LAUNCH_SECURITY_AUDIT_2026-04-24.md](./docs/LAUNCH_SECURITY_AUDIT_2026-04-24.md) - launch security audit

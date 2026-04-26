@@ -1,0 +1,43 @@
+name: Optional Docker Workbench
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dev-smoke:
+    name: dev-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dev image
+        run: docker build -f docker/dev/Dockerfile -t spark-cli-dev:ci .
+
+      - name: Run dev smoke
+        run: docker run --rm spark-cli-dev:ci
+
+  sandbox-smoke:
+    name: sandbox-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build sandbox image
+        run: docker build -f docker/sandbox/Dockerfile -t spark-cli-sandbox:ci .
+
+      - name: Run sandbox help with hardened flags
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --tmpfs /sandbox:rw,nosuid,size=512m \
+            spark-cli-sandbox:ci \
+            --help
