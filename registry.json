@@ -9,21 +9,21 @@
     },
     "spark-character": {
       "source": "https://github.com/vibeforge1111/spark-character",
-      "commit": "341b33170d5b0e256f1c60d25bfbdb4a24779a87",
+      "commit": "5afe35c928d93740583d923669487d8eb2446c3b",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Persona, voice consistency, scoring, and opt-in character evolution runtime for Spark"
     },
     "spark-telegram-bot": {
       "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-      "commit": "0302f2e50402f8e9771c036be9882a76c68ada52",
+      "commit": "633e59f0e7b6e72fafb16829a0fe7ac6523a957b",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Telegram ingress gateway for the Spark starter stack"
     },
     "spark-intelligence-builder": {
       "source": "https://github.com/vibeforge1111/spark-intelligence-builder",
-      "commit": "64e0e7ddb6314e956932cb507090cfceae5b5cb1",
+      "commit": "351826d6c952cfeccbb448f0613abd9c1f7b4bff",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Spark runtime core for identity, memory, and routing"
@@ -37,7 +37,7 @@
     },
     "spawner-ui": {
       "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
-      "commit": "3e159545ef5ed76137e14d3b839b2d0b347d8b86",
+      "commit": "577dd2a49bbca4a658b2e6802ba8c52d6d905b72",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Execution plane and local dashboard for the Spark starter stack"
