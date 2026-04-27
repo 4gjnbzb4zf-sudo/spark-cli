@@ -24,6 +24,7 @@ from spark_cli.cli import (
     build_module_envs,
     command_with_managed_python,
     collect_secret_requirements,
+    collect_secret_surface_payload,
     collect_secret_values,
     collect_installer_integrity_payload,
     collect_module_provenance_payload,
@@ -455,6 +456,43 @@ class SparkCliTests(unittest.TestCase):
         self.assertNotIn("Alice", redacted)
         self.assertNotIn("1234567890:AA", redacted)
         self.assertIn("~/.spark", redacted)
+
+    def test_secret_surface_payload_flags_generated_plaintext_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "config" / "modules"
+            log_dir = root / "logs"
+            config_dir.mkdir(parents=True)
+            log_dir.mkdir()
+            (config_dir / "spawner-ui.env").write_text(
+                "DEFAULT_MISSION_PROVIDER=codex\nTELEGRAM_RELAY_SECRET=plain-relay-secret\n",
+                encoding="utf-8",
+            )
+            (log_dir / "safe.log").write_text("BOT_TOKEN=<redacted>\n", encoding="utf-8")
+            with patch("spark_cli.cli.MODULE_CONFIG_DIR", config_dir), \
+                 patch("spark_cli.cli.LOG_DIR", log_dir):
+                payload = collect_secret_surface_payload()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(len(payload["findings"]), 1)
+        self.assertIn("spawner-ui.env", payload["findings"][0]["path"])
+        self.assertEqual(payload["findings"][0]["counts"]["env_secret_assignments"], 1)
+
+    def test_secret_surface_payload_ignores_redacted_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_dir = root / "config" / "modules"
+            log_dir = root / "logs"
+            config_dir.mkdir(parents=True)
+            log_dir.mkdir()
+            (log_dir / "semantic_retrieval.jsonl.1").write_text(
+                "BOT_TOKEN=<redacted>\nAPI_KEY=[REDACTED]\n",
+                encoding="utf-8",
+            )
+            with patch("spark_cli.cli.MODULE_CONFIG_DIR", config_dir), \
+                 patch("spark_cli.cli.LOG_DIR", log_dir):
+                payload = collect_secret_surface_payload()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["findings"], [])
 
     def test_upstream_pr_candidate_is_review_first_and_sanitized(self) -> None:
         draft = render_upstream_pr_candidate(
@@ -5300,6 +5338,7 @@ class SparkCliTests(unittest.TestCase):
             patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
             patch("spark_cli.cli.load_module", return_value=make_module("spawner-ui", ["mission.execution"], ["telegram.relay_secret"])), \
             patch("spark_cli.cli.module_runtime_env", return_value={"TELEGRAM_RELAY_SECRET": "relay"}), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}), \
             patch("spark_cli.cli.Path.exists", return_value=True), \
             patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
             patch("spark_cli.cli.pid_is_running", return_value=True):
@@ -5439,6 +5478,7 @@ class SparkCliTests(unittest.TestCase):
                 patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
                 patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
                 patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
+                patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}), \
                 patch("spark_cli.cli.pid_is_running", return_value=True), \
                 patch("spark_cli.cli.subprocess.run", return_value=completed) as run_mock:
                 payload = collect_verify_payload(deep=True)
@@ -5484,11 +5524,13 @@ class SparkCliTests(unittest.TestCase):
             patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
             patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
             patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": False, "detail": "leak", "findings": []}), \
             patch("spark_cli.cli.resolve_bundle_names", return_value=expected):
             payload = collect_verify_payload()
         self.assertFalse(payload["ok"])
         checks = {check["name"]: check for check in payload["checks"]}
         self.assertFalse(checks["llm_roles"]["ok"])
+        self.assertFalse(checks["secret_surface"]["ok"])
         self.assertFalse(checks["telegram_long_polling_security"]["ok"])
         self.assertFalse(checks["builder_memory_bridge"]["ok"])
         self.assertFalse(checks["spawner_mission_relay"]["ok"])
@@ -5555,6 +5597,7 @@ class SparkCliTests(unittest.TestCase):
             patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
             patch("spark_cli.cli.load_module", return_value=make_module("spawner-ui", ["mission.execution"], ["telegram.relay_secret"])), \
             patch("spark_cli.cli.module_runtime_env", return_value={"TELEGRAM_RELAY_SECRET": "relay"}), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}), \
             patch("spark_cli.cli.Path.exists", return_value=True), \
             patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
             patch("spark_cli.cli.pid_is_running", return_value=True):

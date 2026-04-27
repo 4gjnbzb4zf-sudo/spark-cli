@@ -4356,6 +4356,89 @@ SENSITIVE_VALUE_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|token|secret|password|authorization)(\s*[:=]\s*)([^\s,;\"']+)"),
     re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]{16,})"),
 ]
+SECRET_SURFACE_ENV_PATTERN = re.compile(
+    r"(?im)^\s*([A-Z][A-Z0-9_]*(?:API_KEY|BOT_TOKEN|TOKEN|SECRET|PASSWORD|AUTHORIZATION))\s*=\s*([^\r\n#]+)"
+)
+SECRET_SURFACE_TOKEN_PATTERNS = [
+    re.compile(r"\b(?:bot)?\d{7,12}:[A-Za-z0-9_-]{30,}\b"),
+    re.compile(r"\b(?:sk|sk-proj|sk-ant|gho|ghp|glpat|xoxb|xoxp|AIza)[A-Za-z0-9_\-]{16,}\b"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{16,}"),
+]
+SECRET_SURFACE_MAX_FILE_BYTES = 2 * 1024 * 1024
+
+
+def secret_surface_value_is_redacted(value: str) -> bool:
+    normalized = value.strip().strip("\"'")
+    if not normalized:
+        return True
+    return bool(re.fullmatch(r"\[?redacted\]?|<[^>]*redacted[^>]*>", normalized, flags=re.IGNORECASE))
+
+
+def secret_surface_file_findings(path: Path) -> dict[str, int]:
+    try:
+        if not path.is_file() or path.stat().st_size > SECRET_SURFACE_MAX_FILE_BYTES:
+            return {}
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    env_hits = 0
+    for match in SECRET_SURFACE_ENV_PATTERN.finditer(text):
+        if not secret_surface_value_is_redacted(match.group(2)):
+            env_hits += 1
+
+    token_hits = 0
+    scrubbed_env_values = SECRET_SURFACE_ENV_PATTERN.sub(
+        lambda match: f"{match.group(1)}="
+        + ("<redacted>" if secret_surface_value_is_redacted(match.group(2)) else "<secret>"),
+        text,
+    )
+    for pattern in SECRET_SURFACE_TOKEN_PATTERNS:
+        for match in pattern.finditer(scrubbed_env_values):
+            if "redacted" not in match.group(0).lower():
+                token_hits += 1
+
+    findings: dict[str, int] = {}
+    if env_hits:
+        findings["env_secret_assignments"] = env_hits
+    if token_hits:
+        findings["token_like_values"] = token_hits
+    return findings
+
+
+def collect_secret_surface_payload() -> dict[str, Any]:
+    roots = [MODULE_CONFIG_DIR, LOG_DIR]
+    findings: list[dict[str, Any]] = []
+    scanned_files = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            files = [path for path in root.rglob("*") if path.is_file()]
+        except OSError:
+            continue
+        for path in files:
+            scanned_files += 1
+            counts = secret_surface_file_findings(path)
+            if counts:
+                findings.append(
+                    {
+                        "path": redact_shareable_text(str(path)),
+                        "counts": counts,
+                    }
+                )
+
+    return {
+        "ok": not findings,
+        "scanned_files": scanned_files,
+        "findings": findings,
+        "detail": (
+            f"Generated configs/logs scanned clean ({scanned_files} files)."
+            if not findings
+            else f"Found plaintext-looking secrets in {len(findings)} generated config/log file(s)."
+        ),
+        "repair": "spark fix secrets",
+    }
 
 
 def redact_sensitive_text(value: str) -> str:
@@ -4819,6 +4902,26 @@ def collect_telegram_fix_payload() -> dict[str, Any]:
 
 
 def cmd_fix(args: argparse.Namespace) -> int:
+    if args.target == "secrets":
+        payload = collect_secret_surface_payload()
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0 if payload.get("ok") else 1
+        print("Spark secret surface check")
+        print("")
+        marker = "[OK]" if payload.get("ok") else "[FIX]"
+        print(f"{marker} generated configs/logs: {payload['detail']}")
+        for finding in payload.get("findings", []):
+            counts = ", ".join(f"{key}={value}" for key, value in finding.get("counts", {}).items())
+            print(f"      {finding.get('path')} ({counts})")
+        if not payload.get("ok"):
+            print("")
+            print("Repair:")
+            print("  - Rerun `spark setup` after updating modules so keychain-backed secrets are removed from generated env files.")
+            print("  - Delete or redact old local logs before sharing reports.")
+            print("  - Run `spark verify --deep` again before sharing any diagnostics upstream.")
+        return 0 if payload.get("ok") else 1
+
     if args.target != "telegram":
         raise SystemExit(f"Unknown fix target: {args.target}")
     payload = collect_telegram_fix_payload()
@@ -5212,6 +5315,18 @@ def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
                 else "Telegram token/admin setup, long-polling mode, or generated secret hygiene needs repair."
             ),
             "repair": "spark setup telegram-starter",
+        }
+    )
+
+    secret_surface = collect_secret_surface_payload()
+    checks.append(
+        {
+            "name": "secret_surface",
+            "ok": bool(secret_surface.get("ok")),
+            "required": True,
+            "detail": str(secret_surface.get("detail") or ""),
+            "repair": str(secret_surface.get("repair") or "spark fix secrets"),
+            "findings": secret_surface.get("findings", []),
         }
     )
 
@@ -7363,7 +7478,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.set_defaults(func=cmd_verify)
 
     fix_parser = subparsers.add_parser("fix", help="Run targeted repair guidance for common Spark issues")
-    fix_parser.add_argument("target", nargs="?", choices=["telegram"], default="telegram")
+    fix_parser.add_argument("target", nargs="?", choices=["telegram", "secrets"], default="telegram")
     fix_parser.add_argument("--json", action="store_true")
     fix_parser.set_defaults(func=cmd_fix)
 
