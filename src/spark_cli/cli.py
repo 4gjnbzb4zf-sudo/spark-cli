@@ -641,6 +641,15 @@ def update_module_source(module: Module) -> tuple[bool, str]:
     return True, f"checked out pinned commit {current_commit[:12]}..{pinned_commit[:12]}"
 
 
+def is_dirty_update_failure(detail: str) -> bool:
+    lowered = str(detail or "").lower()
+    return (
+        "working tree has local changes" in lowered
+        or "commit or stash" in lowered
+        or "local changes would be overwritten" in lowered
+    )
+
+
 def module_is_git_managed(module_path: Path) -> bool:
     try:
         return module_path.is_relative_to(SPARK_HOME / "modules")
@@ -7131,6 +7140,13 @@ def cmd_update(args: argparse.Namespace) -> int:
             ok, detail = update_module_source(module)
             print(f"git update {module.name}: {'ok' if ok else 'failed'} - {detail}")
             if not ok:
+                if getattr(args, "skip_dirty", False) and is_dirty_update_failure(detail):
+                    print(f"Skipping {module.name}: local changes are present, so Spark left this module untouched.")
+                    print(
+                        "Repair later: inspect with "
+                        f"`git -C \"{module.path}\" status --short`, then commit/stash or reinstall."
+                    )
+                    continue
                 print(f"Update stopped before touching running processes for {module.name}.")
                 print(
                     "Repair: inspect local changes with "
@@ -7562,6 +7578,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser = subparsers.add_parser("update", help="Refresh installed modules from their current source paths")
     update_parser.add_argument("target", nargs="?")
     update_parser.add_argument("--skip-install-commands", action="store_true")
+    update_parser.add_argument("--skip-dirty", action="store_true", help="Skip modules with local git changes and continue updating clean modules")
     update_parser.set_defaults(func=cmd_update)
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove installed modules from Spark state and generated config")

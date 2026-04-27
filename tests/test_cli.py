@@ -55,6 +55,7 @@ from spark_cli.cli import (
     initial_follow_log_lines,
     initialize_builder_runtime_home,
     install_command_argv,
+    is_dirty_update_failure,
     installer_manifest_payload,
     git_command,
     is_git_source,
@@ -4850,6 +4851,7 @@ class SparkCliTests(unittest.TestCase):
         class Args:
             target = None
             skip_install_commands = False
+            skip_dirty = False
 
         with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[module]), \
              patch("spark_cli.cli.print_install_summary"), \
@@ -4881,6 +4883,7 @@ class SparkCliTests(unittest.TestCase):
         class Args:
             target = "spawner-ui"
             skip_install_commands = False
+            skip_dirty = False
 
         with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[module]), \
              patch("spark_cli.cli.print_install_summary"), \
@@ -4895,6 +4898,52 @@ class SparkCliTests(unittest.TestCase):
         install.assert_not_called()
         hook.assert_not_called()
 
+    def test_cmd_update_skip_dirty_continues_to_clean_modules(self) -> None:
+        dirty = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "0.1.0", "kind": "service", "plane": "ingress"}
+            },
+        )
+        clean = Module(
+            name="spark-intelligence-builder",
+            path=Path("C:/tmp/spark-intelligence-builder"),
+            manifest={
+                "module": {"name": "spark-intelligence-builder", "version": "0.1.0", "kind": "runtime", "plane": "runtime"}
+            },
+        )
+
+        class Args:
+            target = None
+            skip_install_commands = True
+            skip_dirty = True
+
+        def fake_update(module: Module) -> tuple[bool, str]:
+            if module.name == "spark-telegram-bot":
+                return False, "working tree has local changes; commit or stash them before updating"
+            return True, "Already up to date."
+
+        with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[dirty, clean]), \
+             patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.module_is_git_managed", return_value=True), \
+             patch("spark_cli.cli.update_module_source", side_effect=fake_update), \
+             patch("spark_cli.cli.tracked_process_keys_for_module", return_value=[]), \
+             patch("spark_cli.cli.run_module_hook") as hook, \
+             patch("spark_cli.cli.load_json", return_value={"spark-intelligence-builder": {"installed_via": {"kind": "git", "target": "repo"}}}), \
+             patch("spark_cli.cli.install_module_record") as record, \
+             patch("spark_cli.cli.sync_generated_env_to_module"):
+            self.assertEqual(cmd_update(Args()), 0)
+
+        hook.assert_called_once_with(clean, "post_install")
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0], clean)
+
+    def test_dirty_update_failure_detection_accepts_common_git_messages(self) -> None:
+        self.assertTrue(is_dirty_update_failure("working tree has local changes; commit or stash them before updating"))
+        self.assertTrue(is_dirty_update_failure("Your local changes would be overwritten by merge"))
+        self.assertFalse(is_dirty_update_failure("fatal: couldn't find remote ref"))
+
     def test_cmd_update_stops_all_profiled_module_processes(self) -> None:
         module = Module(
             name="spark-telegram-bot",
@@ -4907,6 +4956,7 @@ class SparkCliTests(unittest.TestCase):
         class Args:
             target = "spark-telegram-bot"
             skip_install_commands = True
+            skip_dirty = False
 
         pids = {
             "spark-telegram-bot": {"pid": 111, "module": "spark-telegram-bot"},
