@@ -166,7 +166,17 @@ By default, one provider powers everything:
 spark setup --llm-provider zai --zai-api-key @clipboard
 ```
 
-That configures chat, Builder, memory, retrieval, and Spawner missions together. For more control later, set separate providers for Spark's roles:
+That configures the Agent and Missions together. The Agent includes conversation, Spark reasoning/runtime, memory, and recall. Missions are Spawner builds and longer-running work.
+
+For more control later, split the Agent and Mission brains:
+
+```bash
+spark setup --resume \
+  --agent-llm-provider zai \
+  --mission-llm-provider codex
+```
+
+For expert control, set the internal providers directly:
 
 ```bash
 spark setup \
@@ -176,7 +186,7 @@ spark setup \
   --mission-llm-provider minimax
 ```
 
-`--llm-provider` is the simple default for all roles. The role-specific flags override it when you want, for example, a local model for memory and a stronger cloud model for Builder or mission work.
+`--llm-provider` is the simple default for everything. `--agent-llm-provider` sets chat, runtime reasoning, and memory together. The expert role-specific flags override those when you want, for example, a local model for memory and a stronger cloud model for mission work.
 
 If the Telegram bot is quiet after install, run the targeted repair checklist:
 

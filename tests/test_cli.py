@@ -1519,6 +1519,8 @@ class SparkCliTests(unittest.TestCase):
             [
                 "setup",
                 "--non-interactive",
+                "--agent-llm-provider",
+                "zai",
                 "--chat-llm-provider",
                 "openrouter",
                 "--builder-llm-provider",
@@ -1529,6 +1531,7 @@ class SparkCliTests(unittest.TestCase):
                 "minimax",
             ]
         )
+        self.assertEqual(args.agent_llm_provider, "zai")
         self.assertEqual(args.chat_llm_provider, "openrouter")
         self.assertEqual(args.builder_llm_provider, "openai")
         self.assertEqual(args.memory_llm_provider, "huggingface")
@@ -1608,6 +1611,36 @@ class SparkCliTests(unittest.TestCase):
         with patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}):
             roles = resolve_llm_roles(args, {"llm.zai.api_key": "zai-key"})
         self.assertEqual(roles["mission"], "zai")
+
+    def test_resolve_llm_roles_agent_provider_sets_chat_runtime_and_memory(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "setup",
+                "--non-interactive",
+                "--llm-provider",
+                "codex",
+                "--agent-llm-provider",
+                "zai",
+            ]
+        )
+        roles = resolve_llm_roles(args, {"llm.zai.api_key": "zai-key"})
+        self.assertEqual(roles, {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "codex"})
+
+    def test_resolve_llm_roles_expert_flags_override_agent_provider(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "setup",
+                "--non-interactive",
+                "--llm-provider",
+                "codex",
+                "--agent-llm-provider",
+                "zai",
+                "--memory-llm-provider",
+                "ollama",
+            ]
+        )
+        roles = resolve_llm_roles(args, {"llm.zai.api_key": "zai-key"})
+        self.assertEqual(roles, {"chat": "zai", "builder": "zai", "memory": "ollama", "mission": "codex"})
 
     def test_collect_setup_configuration_builds_state_without_install_side_effects(self) -> None:
         gateway = Module(
@@ -2129,10 +2162,10 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("@BotFather", output)
         self.assertIn("Windows PowerShell/CMD", output)
         self.assertIn("WSL Ubuntu shell", output)
-        self.assertIn("Pick LLM providers", output)
-        self.assertIn("chat: Telegram chat replies", output)
+        self.assertIn("Pick your Spark brain", output)
+        self.assertIn("agent: Conversation, Spark reasoning/runtime, memory, and recall.", output)
         self.assertIn("spark setup --llm-provider openai", output)
-        self.assertIn("--chat-llm-provider openai", output)
+        self.assertIn("--agent-llm-provider zai", output)
         self.assertIn("signed-in Codex CLI", output)
         self.assertIn("spark autostart install --now", output)
         self.assertIn("spark verify --onboarding", output)
@@ -2164,7 +2197,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Windows PowerShell/CMD", payload["operating_systems"])
         self.assertEqual(
             [item["role"] for item in payload["setup"]["llm_roles"]],
-            ["chat", "builder", "memory", "mission"],
+            ["default", "agent", "mission"],
         )
 
     def test_setup_default_bundle_registers_starter_stack(self) -> None:

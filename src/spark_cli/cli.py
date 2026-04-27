@@ -2204,6 +2204,8 @@ def describe_llm_provider_setup(provider: str) -> str:
 def setup_has_llm_provider_selection(args: argparse.Namespace) -> bool:
     if getattr(args, "llm_provider", None):
         return True
+    if getattr(args, "agent_llm_provider", None):
+        return True
     return any(getattr(args, f"{role}_llm_provider", None) for role in LLM_ROLES)
 
 
@@ -2239,6 +2241,9 @@ def selected_llm_providers(args: argparse.Namespace, secret_values: dict[str, st
     default_provider = resolve_llm_provider(args, secret_values)
     if default_provider != "not_configured":
         providers.append(default_provider)
+    agent_provider = getattr(args, "agent_llm_provider", None)
+    if agent_provider and agent_provider not in providers:
+        providers.append(str(agent_provider))
     for role in LLM_ROLES:
         provider = getattr(args, f"{role}_llm_provider", None)
         if provider and provider not in providers:
@@ -2299,8 +2304,8 @@ def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, s
     for role in LLM_ROLES:
         role_provider = roles[role]
         print(f"  {role}: {LLM_PROVIDER_LABELS.get(role_provider, role_provider)}")
-    print("  Advanced: rerun setup with --chat-llm-provider, --builder-llm-provider,")
-    print("            --memory-llm-provider, or --mission-llm-provider to split roles later.")
+    print("  Advanced: rerun setup with --agent-llm-provider and/or --mission-llm-provider")
+    print("            to split Agent and Mission brains later.")
     return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
 
 
@@ -2346,6 +2351,7 @@ def openai_base_url_kind(base_url: str | None) -> str:
 
 def resolve_llm_roles(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
     default_provider = resolve_llm_provider(args, secret_values)
+    agent_provider = getattr(args, "agent_llm_provider", None)
     roles: dict[str, str] = {}
     for role in LLM_ROLES:
         explicit = getattr(args, f"{role}_llm_provider", None)
@@ -2353,6 +2359,8 @@ def resolve_llm_roles(args: argparse.Namespace, secret_values: dict[str, str]) -
             roles[role] = str(explicit)
         elif role == "mission":
             roles[role] = default_mission_llm_provider(default_provider)
+        elif agent_provider:
+            roles[role] = str(agent_provider)
         else:
             roles[role] = default_provider
     return roles
@@ -7601,7 +7609,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 def onboarding_guide_payload() -> dict[str, Any]:
     return {
         "title": "Spark starter guide",
-        "goal": "Install once, configure one Telegram bot, choose LLM providers by role, then talk to Spark from Telegram.",
+        "goal": "Install once, configure one Telegram bot, choose one default Spark brain, then talk to Spark from Telegram.",
         "operating_systems": ["Windows PowerShell/CMD", "macOS Terminal", "Linux shell", "WSL Ubuntu shell"],
         "starter_bundle": [
             {
@@ -7635,10 +7643,9 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "Run spark setup again with the bot token and admin id if you did not provide them during install.",
             ],
             "llm_roles": [
-                {"role": "chat", "use": "Telegram chat replies and normal conversation."},
-                {"role": "builder", "use": "Builder reasoning, orchestration, and Spark runtime decisions."},
-                {"role": "memory", "use": "Memory synthesis, recall shaping, and domain-chip memory work."},
-                {"role": "mission", "use": "Spawner missions, coding/build work, and execution tasks."},
+                {"role": "default", "use": "One provider for the Agent and Missions. This is the easiest first setup."},
+                {"role": "agent", "use": "Conversation, Spark reasoning/runtime, memory, and recall."},
+                {"role": "mission", "use": "Spawner builds, coding/build work, and execution tasks."},
             ],
             "llm_examples": [
                 "spark setup",
@@ -7653,9 +7660,10 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "spark setup --llm-provider minimax --minimax-api-key <MINIMAX_API_KEY>",
                 "spark setup --llm-provider huggingface --huggingface-api-key <HF_TOKEN> --huggingface-model <MODEL>",
                 "spark setup --llm-provider ollama --ollama-url http://localhost:11434 --ollama-model <MODEL>",
+                "spark setup --agent-llm-provider zai --mission-llm-provider codex",
                 "spark setup --chat-llm-provider openai --builder-llm-provider openai --memory-llm-provider ollama --mission-llm-provider minimax",
             ],
-            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. OpenAI can use a signed-in Codex CLI / ChatGPT session, OPENAI_API_KEY, or an OpenAI-compatible local server such as LM Studio with --openai-base-url. Anthropic can use Claude Code or ANTHROPIC_API_KEY. OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys. Ollama is local. If your default chat LLM is not a local executor, Spark uses Codex or Claude for mission/build execution when available.",
+            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. One provider powers both the Agent and Missions by default. Later, `--agent-llm-provider` can set conversation/runtime/memory together, and `--mission-llm-provider` can set Spawner build work separately. OpenAI can use a signed-in Codex CLI / ChatGPT session, OPENAI_API_KEY, or an OpenAI-compatible local server such as LM Studio with --openai-base-url. Anthropic can use Claude Code or ANTHROPIC_API_KEY. OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys. Ollama is local.",
         },
         "start": [
             "spark autostart install --now",
@@ -7735,7 +7743,7 @@ def cmd_guide(args: argparse.Namespace) -> int:
     for step in payload["setup"]["botfather"]:
         print(f"   - {step}")
     print("")
-    print("2. Pick LLM providers")
+    print("2. Pick your Spark brain")
     for item in payload["setup"]["llm_roles"]:
         print(f"   - {item['role']}: {item['use']}")
     print(f"   {payload['setup']['llm_auth_note']}")
@@ -7841,8 +7849,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup_parser.add_argument("--spawner-ui-url", default="http://127.0.0.1:5173")
     setup_parser.add_argument("--llm-provider", choices=LLM_PROVIDER_CHOICES, help="Default provider for all Spark LLM roles unless a role-specific provider is set")
+    setup_parser.add_argument("--agent-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for the Spark Agent: chat, runtime reasoning, memory, and recall")
     setup_parser.add_argument("--chat-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Telegram chat replies")
-    setup_parser.add_argument("--builder-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Builder reasoning and orchestration")
+    setup_parser.add_argument("--builder-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Expert: provider for Spark runtime reasoning and orchestration")
     setup_parser.add_argument("--memory-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for memory synthesis and recall")
     setup_parser.add_argument("--mission-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Spawner missions and coding/build work")
     setup_parser.add_argument("--zai-api-key", help="Z.AI / GLM coding endpoint API key, @clipboard, @env:NAME, or @file:path")
