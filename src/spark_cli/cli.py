@@ -2278,39 +2278,20 @@ def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, s
     if setup_has_llm_provider_selection(args):
         return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
     print("")
-    print("Choose your chat brain")
-    print("  This powers normal Telegram chat, Builder reasoning, and memory.")
-    print("  Build missions can use Codex or Claude locally when they are available.")
+    print("Choose your Spark brain")
+    print("  This one provider powers chat, Builder, memory, retrieval, and Spawner missions.")
+    print("  You can split providers later with the role-specific flags if you want advanced control.")
     print("  Press Enter for the recommended OpenAI/Codex path, or type a number/provider name.")
     for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
         suffix = " [recommended]" if provider == "openai" else ""
         print(f"  {index}. {describe_llm_provider_setup(provider)}{suffix}")
     print("  0. Skip for now")
-    provider = prompt_for_provider_choice("Chat brain [1/OpenAI, 0 to skip]: ", "openai")
+    provider = prompt_for_provider_choice("Spark brain [1/OpenAI, 0 to skip]: ", "openai")
     if provider is None:
         return secret_values
     if provider == "not_configured":
         return secret_values
     setattr(args, "llm_provider", provider)
-
-    try:
-        print("")
-        print("Role setup")
-        print("  1. Balanced: use this brain for chat/Builder/memory; use Codex/Claude for builds when available.")
-        print("  2. Same brain everywhere: use this provider for chat, Builder, memory, and missions.")
-        print("  3. Pick per role: choose separate providers for chat, Builder, memory, and missions.")
-        split_roles = input("Role setup [1/Balanced]: ").strip().lower()
-    except EOFError:
-        split_roles = ""
-    if split_roles in {"2", "same", "one", "all"}:
-        for role in LLM_ROLES:
-            setattr(args, f"{role}_llm_provider", provider)
-    elif split_roles in {"3", "custom", "customize", "customise", "y", "yes"}:
-        for role in LLM_ROLES:
-            label = LLM_ROLE_LABELS[role]
-            chosen = prompt_for_provider_choice(f"  {label} provider [{provider}]: ", provider)
-            if chosen and chosen != "not_configured":
-                setattr(args, f"{role}_llm_provider", chosen)
 
     roles = resolve_llm_roles(args, secret_values)
     print("")
@@ -2318,6 +2299,8 @@ def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, s
     for role in LLM_ROLES:
         role_provider = roles[role]
         print(f"  {role}: {LLM_PROVIDER_LABELS.get(role_provider, role_provider)}")
+    print("  Advanced: rerun setup with --chat-llm-provider, --builder-llm-provider,")
+    print("            --memory-llm-provider, or --mission-llm-provider to split roles later.")
     return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
 
 
@@ -2343,13 +2326,7 @@ def resolve_llm_provider(args: argparse.Namespace, secret_values: dict[str, str]
 
 
 def default_mission_llm_provider(default_provider: str) -> str:
-    """Prefer a local executor for missions when the default LLM is chat-only."""
-    if default_provider in {"codex", "openai", "anthropic", "not_configured"}:
-        return default_provider
-    if detect_codex_cli()["present"]:
-        return "codex"
-    if detect_claude_code()["present"]:
-        return "anthropic"
+    """Use the user's chosen provider for missions unless they explicitly split roles."""
     return default_provider
 
 

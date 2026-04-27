@@ -116,7 +116,7 @@ bash ./install.sh \
 
 That command installs and wires the starter stack, but it intentionally does not invent an LLM provider. If no provider is chosen, `spark status` and `spark fix telegram` report the LLM roles as not configured instead of silently falling back to a local model.
 
-To wire LLMs during setup, run interactive `spark setup` and choose from the provider menu. The wizard first asks for Telegram/BotFather values, then asks which LLM provider should power Spark, then only asks for the key that provider actually needs. You can keep one provider for all roles or split chat, Builder, memory, and mission work during the same flow.
+To wire LLMs during setup, run interactive `spark setup` and choose from the provider menu. The wizard first asks for Telegram/BotFather values, then asks which single LLM provider should power Spark. That provider is used for chat, Builder, memory, retrieval, and Spawner missions by default, and setup only asks for the key that provider actually needs. Advanced users can split chat, Builder, memory, and mission providers later with the role-specific flags.
 
 Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
 
@@ -160,7 +160,13 @@ Rerunning setup is meant to be a fast configuration refresh. If the starter stac
 spark setup --resume --run-install-commands
 ```
 
-For more control, set separate providers for Spark's roles:
+By default, one provider powers everything:
+
+```bash
+spark setup --llm-provider zai --zai-api-key @clipboard
+```
+
+That configures chat, Builder, memory, retrieval, and Spawner missions together. For more control later, set separate providers for Spark's roles:
 
 ```bash
 spark setup \
@@ -170,7 +176,7 @@ spark setup \
   --mission-llm-provider minimax
 ```
 
-`--llm-provider` remains the simple default for all roles. The role-specific flags override it when you want, for example, a local model for memory and a stronger cloud model for Builder or mission work.
+`--llm-provider` is the simple default for all roles. The role-specific flags override it when you want, for example, a local model for memory and a stronger cloud model for Builder or mission work.
 
 If the Telegram bot is quiet after install, run the targeted repair checklist:
 

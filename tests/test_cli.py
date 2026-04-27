@@ -1585,13 +1585,13 @@ class SparkCliTests(unittest.TestCase):
         self.assertNotIn("MINIMAX_API_KEY", env)
         self.assertNotIn("HF_TOKEN", env)
 
-    def test_resolve_llm_roles_defaults_chat_api_missions_to_codex_executor(self) -> None:
+    def test_resolve_llm_roles_uses_one_provider_for_every_role_by_default(self) -> None:
         args = build_parser().parse_args(["setup", "--non-interactive", "--llm-provider", "zai"])
         with patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}):
             roles = resolve_llm_roles(args, {"llm.zai.api_key": "zai-key"})
         self.assertEqual(
             roles,
-            {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "codex"},
+            {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
         )
 
     def test_resolve_llm_roles_keeps_explicit_mission_provider(self) -> None:
@@ -1682,7 +1682,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(setup_state["llm"]["provider"], "zai")
         self.assertEqual(
             {role: role_state["provider"] for role, role_state in setup_state["llm"]["roles"].items()},
-            {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "codex"},
+            {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
         )
 
     def test_registry_sources_use_canonical_public_repos(self) -> None:
@@ -2319,7 +2319,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("Need a bot token? Open @BotFather", setup_output)
             self.assertIn("LLM roles:", setup_output)
             self.assertIn("chat: zai", setup_output)
-            self.assertIn("mission: codex", setup_output)
+            self.assertIn("mission: zai", setup_output)
             self.assertIn("Builder runtime: prepared Builder home", setup_output)
 
             expected = [
@@ -2350,7 +2350,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(setup_state["llm"]["auth_mode"], "api_key")
             self.assertEqual(
                 {role: state["provider"] for role, state in setup_state["llm"]["roles"].items()},
-                {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "codex"},
+                {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
             )
             expected_builder_home = state_dir / "spark-intelligence"
             self.assertEqual(setup_state["builder_home"], str(expected_builder_home))
@@ -2376,11 +2376,11 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("SPARK_CHAT_LLM_PROVIDER=zai", gateway_env)
             self.assertIn("SPARK_BUILDER_LLM_PROVIDER=zai", gateway_env)
             self.assertIn("SPARK_MEMORY_LLM_PROVIDER=zai", gateway_env)
-            self.assertIn("SPARK_MISSION_LLM_PROVIDER=codex", gateway_env)
+            self.assertIn("SPARK_MISSION_LLM_PROVIDER=zai", gateway_env)
             self.assertNotIn("BOT_TOKEN=", spawner_env)
             self.assertIn("SPARK_LLM_PROVIDER=zai", spawner_env)
             self.assertIn("SPARK_CHAT_LLM_PROVIDER=zai", spawner_env)
-            self.assertIn("DEFAULT_MISSION_PROVIDER=codex", spawner_env)
+            self.assertIn("DEFAULT_MISSION_PROVIDER=zai", spawner_env)
             self.assertNotIn("SPARK_SPARK_LLM_PROVIDER", spawner_env)
             self.assertNotIn("SPARK_ZAI_API_KEY", spawner_env)
             self.assertIn("MISSION_CONTROL_WEBHOOK_URLS=http://127.0.0.1:8788/spawner-events", spawner_env)
@@ -3023,9 +3023,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(gateway_env["ZAI_MODEL"], "glm-5.1")
         self.assertEqual(gateway_env["SPARK_CHAT_LLM_PROVIDER"], "zai")
         self.assertEqual(gateway_env["SPARK_CHAT_LLM_AUTH_MODE"], "api_key")
-        self.assertEqual(gateway_env["SPARK_MISSION_LLM_PROVIDER"], "codex")
-        self.assertEqual(envs["spawner-ui"]["DEFAULT_MISSION_PROVIDER"], "codex")
-        self.assertEqual(envs["spawner-ui"]["CODEX_PATH"], "/usr/local/bin/codex")
+        self.assertEqual(gateway_env["SPARK_MISSION_LLM_PROVIDER"], "zai")
+        self.assertEqual(envs["spawner-ui"]["DEFAULT_MISSION_PROVIDER"], "zai")
+        self.assertNotIn("CODEX_PATH", envs["spawner-ui"])
         self.assertEqual(envs["spawner-ui"]["SPARK_ZAI_MODEL"], "glm-5.1")
         self.assertEqual(envs["spawner-ui"]["SPARK_CHAT_LLM_PROVIDER"], "zai")
         self.assertNotIn("SPARK_ZAI_API_KEY", envs["spawner-ui"])
@@ -4140,7 +4140,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(args.llm_provider, "zai")
         self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
 
-    def test_run_llm_provider_wizard_can_force_one_provider_for_all_roles(self) -> None:
+    def test_run_llm_provider_wizard_defaults_to_one_provider_for_all_roles(self) -> None:
         class Args:
             llm_provider = None
             chat_llm_provider = None
@@ -4149,16 +4149,13 @@ class SparkCliTests(unittest.TestCase):
             mission_llm_provider = None
 
         args = Args()
-        with patch("builtins.input", side_effect=["zai", "2"]), \
+        with patch("builtins.input", side_effect=["zai"]), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
             values = run_llm_provider_wizard(args, {})
 
         self.assertEqual(args.llm_provider, "zai")
-        self.assertEqual(args.chat_llm_provider, "zai")
-        self.assertEqual(args.builder_llm_provider, "zai")
-        self.assertEqual(args.memory_llm_provider, "zai")
-        self.assertEqual(args.mission_llm_provider, "zai")
+        self.assertEqual(resolve_llm_roles(args, values), {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"})
         self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
 
     def test_run_llm_provider_wizard_collects_key_for_explicit_zai_selection(self) -> None:
@@ -4190,7 +4187,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(args.llm_provider, "minimax")
         self.assertEqual(values["llm.minimax.api_key"], "minimax-test-key")
 
-    def test_run_llm_provider_wizard_can_customize_roles(self) -> None:
+    def test_run_llm_provider_wizard_keeps_one_provider_for_all_roles(self) -> None:
         class Args:
             llm_provider = None
             chat_llm_provider = None
@@ -4199,16 +4196,16 @@ class SparkCliTests(unittest.TestCase):
             mission_llm_provider = None
 
         args = Args()
-        answers = ["zai", "yes", "zai", "openai", "ollama", "codex"]
+        answers = ["zai"]
         with patch("builtins.input", side_effect=answers), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
             values = run_llm_provider_wizard(args, {})
         self.assertEqual(args.llm_provider, "zai")
-        self.assertEqual(args.chat_llm_provider, "zai")
-        self.assertEqual(args.builder_llm_provider, "openai")
-        self.assertEqual(args.memory_llm_provider, "ollama")
-        self.assertEqual(args.mission_llm_provider, "codex")
+        self.assertIsNone(args.chat_llm_provider)
+        self.assertIsNone(args.builder_llm_provider)
+        self.assertIsNone(args.memory_llm_provider)
+        self.assertIsNone(args.mission_llm_provider)
         self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
 
     def test_run_llm_provider_wizard_defaults_to_openai_codex_oauth(self) -> None:
@@ -4220,7 +4217,7 @@ class SparkCliTests(unittest.TestCase):
             mission_llm_provider = None
 
         args = Args()
-        with patch("builtins.input", side_effect=["", ""]), \
+        with patch("builtins.input", side_effect=[""]), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("sys.stdout", new_callable=StringIO) as stdout, \
              patch("spark_cli.cli.getpass.getpass") as getpass_mock:
@@ -4229,14 +4226,13 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(values, {})
         getpass_mock.assert_not_called()
         output = stdout.getvalue()
-        self.assertIn("Choose your chat brain", output)
+        self.assertIn("Choose your Spark brain", output)
+        self.assertIn("chat, Builder, memory, retrieval, and Spawner missions", output)
         self.assertIn("recommended OpenAI/Codex path", output)
         self.assertIn("MiniMax", output)
         self.assertIn("ChatGPT/Codex sign-in detected", output)
-        self.assertIn("Balanced: use this brain for chat/Builder/memory", output)
-        self.assertIn("Same brain everywhere", output)
-        self.assertIn("Pick per role", output)
-        self.assertNotIn("Advanced", output)
+        self.assertIn("--mission-llm-provider", output)
+        self.assertNotIn("Role setup", output)
 
     def test_collect_secret_values_prompts_when_interactive_and_missing(self) -> None:
         module = Module(
