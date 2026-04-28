@@ -1871,7 +1871,7 @@ def print_setup_preflight(bundle: list[Module]) -> None:
     if cc["present"]:
         print(f"  [OK]   claude (Claude Code) detected at {cc['path']}")
     else:
-        print("  [miss] claude (Claude Code) not on PATH -- install for Claude subscription/OAuth-style calls")
+        print("  [miss] claude (Claude Code) not on PATH -- install/sign in for `claude -p` subscription/OAuth-style calls")
     codex = detect_codex_cli()
     if codex["present"]:
         print(f"  [OK]   codex (OpenAI/Codex CLI) detected at {codex['path']}")
@@ -2175,7 +2175,7 @@ LLM_PROVIDER_LABELS = {
 LLM_PROVIDER_AUTH_HINTS = {
     "openai": "signed-in Codex CLI, OPENAI_API_KEY, or local OpenAI-compatible server",
     "codex": "signed-in Codex CLI",
-    "anthropic": "Claude Code sign-in or ANTHROPIC_API_KEY",
+    "anthropic": "Claude Code `claude -p` sign-in path or ANTHROPIC_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "huggingface": "HF_TOKEN",
     "zai": "ZAI_API_KEY",
@@ -2193,7 +2193,7 @@ def describe_llm_provider_setup(provider: str) -> str:
     elif provider == "codex":
         status = "Codex CLI detected" if detect_codex_cli()["present"] else "run `codex` to sign in first"
     elif provider == "anthropic":
-        status = "Claude Code detected" if detect_claude_code()["present"] else "use ANTHROPIC_API_KEY or run `claude` to sign in"
+        status = "Claude Code detected; Spark can call it with `claude -p`" if detect_claude_code()["present"] else "use ANTHROPIC_API_KEY or run `claude` to sign in"
     elif provider == "ollama":
         status = "local Ollama server"
     elif provider == "openrouter":
@@ -3661,7 +3661,7 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
             )
         elif provider == "anthropic" and auth_mode == "not_configured":
             hints.append(
-                f"{role_label} uses Anthropic but neither Claude Code nor ANTHROPIC_API_KEY is configured. Run `claude` to sign in, or rerun `spark setup {role_flag} anthropic --anthropic-api-key <key>`."
+                f"{role_label} uses Anthropic but neither Claude Code nor ANTHROPIC_API_KEY is configured. Run `claude` to sign in so Spark can call `claude -p`, or rerun `spark setup {role_flag} anthropic --anthropic-api-key <key>`."
             )
         elif provider == "openai" and auth_mode == "not_configured" and openai_base_url_kind(str(state.get("base_url") or llm_state.get("base_url") or "")) == "remote_custom":
             hints.append(
@@ -3813,7 +3813,7 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     print("Need a bot token? Open @BotFather in Telegram, run /newbot, then rerun:")
     print(f"     spark setup {bundle_name}")
     print("Need to choose or change LLMs? Run `spark setup` for the guided picker, or use role flags for automation.")
-    print("OpenAI can use a signed-in Codex/ChatGPT session (`codex`) or OPENAI_API_KEY; Anthropic can use Claude Code (`claude`) or ANTHROPIC_API_KEY.")
+    print("OpenAI can use a signed-in Codex/ChatGPT session (`codex`) or OPENAI_API_KEY; Anthropic can use Claude Code (`claude -p`) or ANTHROPIC_API_KEY.")
     print("OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys; Ollama and LM Studio-style local servers stay local.")
     print("For role-level control, use --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, and --mission-llm-provider.")
     print("Need to turn the agent off? Run `spark stop telegram-starter` or `spark autostart uninstall`.")
@@ -4970,7 +4970,7 @@ def codex_cli_completion(target: dict[str, Any], prompt: str) -> str:
 
 def claude_cli_completion(target: dict[str, Any], prompt: str) -> str:
     claude_path = str(target.get("cli_path") or shutil.which("claude") or "claude")
-    command = [claude_path, "--print", "--output-format", "text"]
+    command = [claude_path, "-p", "--output-format", "text"]
     model = str(target.get("model") or "").strip()
     if model:
         command.extend(["--model", model])
@@ -7792,7 +7792,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "spark setup --agent-llm-provider zai --mission-llm-provider codex",
                 "spark setup --chat-llm-provider openai --builder-llm-provider openai --memory-llm-provider ollama --mission-llm-provider minimax",
             ],
-            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. One provider powers the Agent and Missions by default. Later, `--agent-llm-provider` can set conversation/runtime/memory together, and `--mission-llm-provider` can set Spawner build work separately. OpenAI can use Codex sign-in, OPENAI_API_KEY, or a local OpenAI-compatible server such as LM Studio. Anthropic can use Claude Code or ANTHROPIC_API_KEY. OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys. Ollama is local.",
+            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. One provider powers the Agent and Missions by default. Later, `--agent-llm-provider` can set conversation/runtime/memory together, and `--mission-llm-provider` can set Spawner build work separately. OpenAI can use Codex sign-in, OPENAI_API_KEY, or a local OpenAI-compatible server such as LM Studio. Anthropic can use Claude Code through `claude -p` or ANTHROPIC_API_KEY. OpenRouter, Z.AI, MiniMax, and Hugging Face use API keys. Ollama is local.",
         },
         "quick_start": [
             {"title": "Get your Telegram bot ready", "steps": [

@@ -631,7 +631,7 @@ class SparkCliTests(unittest.TestCase):
             response = call_llm_doctor(target, "Reply with exactly PING_OK. No extra words.")
         self.assertEqual(response, "PING_OK")
         command = run_mock.call_args.args[0]
-        self.assertEqual(command[:3], ["claude", "--print", "--output-format"])
+        self.assertEqual(command[:3], ["claude", "-p", "--output-format"])
         self.assertIn("--model", command)
         self.assertIn("claude-sonnet-4.5", command)
 
