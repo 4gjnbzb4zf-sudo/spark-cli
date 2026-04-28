@@ -2306,7 +2306,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("agent: Conversation, Spark runtime reasoning, memory, and recall.", output)
         self.assertIn("spark setup --llm-provider openai", output)
         self.assertIn("--agent-llm-provider zai", output)
-        self.assertIn("Codex CLI", output)
+        self.assertIn("OpenAI Codex", output)
         self.assertIn("Kimi/Moonshot", output)
         self.assertIn("Run another Telegram bot", output)
         self.assertIn("spark start spark-telegram-bot --profile qa-bot", output)
@@ -4399,9 +4399,9 @@ class SparkCliTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("Choose your Spark brain", output)
         self.assertIn("chat, Builder, memory, retrieval, and Spawner missions", output)
-        self.assertIn("recommended Codex CLI / ChatGPT sign-in path", output)
+        self.assertIn("recommended OpenAI Codex path", output)
         self.assertIn("MiniMax", output)
-        self.assertIn("Codex CLI detected", output)
+        self.assertIn("OpenAI Codex CLI detected", output)
         self.assertIn("--mission-llm-provider", output)
         self.assertNotIn("Role setup", output)
 
@@ -4427,7 +4427,7 @@ class SparkCliTests(unittest.TestCase):
         with patch("sys.stdout", new_callable=StringIO) as stdout:
             self.assertEqual(args.func(args), 0)
         output = stdout.getvalue()
-        self.assertIn("ChatGPT/Codex subscription", output)
+        self.assertIn("OpenAI Codex subscription", output)
         self.assertIn("Local/private desktop route", output)
         self.assertIn("spark setup --llm-provider lmstudio", output)
 
@@ -4437,7 +4437,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(args.func(args), 0)
         output = stdout.getvalue()
         self.assertIn("Spark LLM recommendations", output)
-        self.assertIn("Claude subscription", output)
+        self.assertIn("Anthropic Claude subscription", output)
         self.assertIn("spark setup --llm-provider anthropic", output)
         self.assertIn("Kimi/Moonshot API route", output)
 
@@ -5353,7 +5353,7 @@ class SparkCliTests(unittest.TestCase):
             [],
             {"llm": {"provider": "zai", "api_key_configured": False}},
         )
-        self.assertIn("LLM provider uses Z.AI / GLM coding endpoint but is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
+        self.assertIn("LLM provider uses Z.AI GLM but is missing an API key. Re-run `spark setup --llm-provider zai --zai-api-key <key>`.", hints)
 
     def test_build_status_repair_hints_reports_missing_starter_runtime_process(self) -> None:
         spawner = Module(
@@ -5408,7 +5408,7 @@ class SparkCliTests(unittest.TestCase):
                 {"llm": {"provider": "openai", "api_key_configured": False, "auth_mode": "not_configured"}},
             )
         self.assertIn(
-            "LLM provider uses OpenAI but OPENAI_API_KEY is not configured. Rerun `spark setup --llm-provider openai --openai-api-key <key>`, or use `spark setup --llm-provider codex` for ChatGPT/Codex sign-in.",
+            "LLM provider uses OpenAI API but OPENAI_API_KEY is not configured. Rerun `spark setup --llm-provider openai --openai-api-key <key>`, or use `spark setup --llm-provider codex` for OpenAI Codex sign-in.",
             hints,
         )
 
@@ -5433,7 +5433,7 @@ class SparkCliTests(unittest.TestCase):
             hints,
         )
         self.assertIn(
-            "LLM role `chat` is not configured. Run `spark setup --chat-llm-provider codex` for Codex CLI sign-in, or choose anthropic, zai, kimi, openrouter, huggingface, minimax, lmstudio, ollama, or openai.",
+            "LLM role `chat` is not configured. Run `spark setup --chat-llm-provider codex` for OpenAI Codex sign-in, or choose anthropic, zai, kimi, openrouter, huggingface, minimax, lmstudio, ollama, or openai.",
             hints,
         )
 
@@ -5557,7 +5557,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(payload["roles"]["memory"]["ready"])
         self.assertFalse(payload["roles"]["mission"]["ready"])
         self.assertIn(
-            "LLM role `mission` is not configured. Run `spark setup --mission-llm-provider codex` for Codex CLI sign-in, or choose anthropic, zai, kimi, openrouter, huggingface, minimax, lmstudio, ollama, or openai.",
+            "LLM role `mission` is not configured. Run `spark setup --mission-llm-provider codex` for OpenAI Codex sign-in, or choose anthropic, zai, kimi, openrouter, huggingface, minimax, lmstudio, ollama, or openai.",
             payload["repair_hints"],
         )
 

@@ -1872,14 +1872,14 @@ def print_setup_preflight(bundle: list[Module]) -> None:
     print("Spark setup preflight:")
     cc = detect_claude_code()
     if cc["present"]:
-        print(f"  [OK]   claude (Claude Code) detected at {cc['path']}")
+        print(f"  [OK]   claude (Anthropic Claude Code) detected at {cc['path']}")
     else:
-        print("  [miss] claude (Claude Code) not on PATH -- install/sign in for `claude -p` subscription/OAuth-style calls")
+        print("  [miss] claude (Anthropic Claude Code) not on PATH -- install/sign in for `claude -p` subscription/OAuth-style calls")
     codex = detect_codex_cli()
     if codex["present"]:
-        print(f"  [OK]   codex (OpenAI/Codex CLI) detected at {codex['path']}")
+        print(f"  [OK]   codex (OpenAI Codex CLI) detected at {codex['path']}")
     else:
-        print("  [miss] codex not on PATH -- install/sign in for OpenAI ChatGPT/Codex OAuth-style calls")
+        print("  [miss] codex not on PATH -- install/sign in for OpenAI Codex OAuth-style calls")
     for runtime_name in required_runtimes_for_modules(bundle):
         info = detect_runtime_binary(runtime_name)
         if info["present"]:
@@ -2187,20 +2187,20 @@ LLM_ROLE_LABELS = {
 }
 LLM_PROVIDER_LABELS = {
     "openai": "OpenAI API",
-    "codex": "Codex CLI / ChatGPT sign-in",
-    "anthropic": "Claude Code / Anthropic",
+    "codex": "OpenAI Codex",
+    "anthropic": "Anthropic Claude",
     "openrouter": "OpenRouter",
     "huggingface": "Hugging Face router",
     "kimi": "Kimi / Moonshot",
     "lmstudio": "LM Studio local",
-    "zai": "Z.AI / GLM coding endpoint",
+    "zai": "Z.AI GLM",
     "minimax": "MiniMax",
     "ollama": "Ollama local",
 }
 LLM_PROVIDER_AUTH_HINTS = {
     "openai": "OPENAI_API_KEY",
-    "codex": "signed-in Codex CLI OAuth",
-    "anthropic": "Claude Code `claude -p` sign-in path",
+    "codex": "OpenAI Codex CLI OAuth",
+    "anthropic": "Anthropic Claude Code `claude -p` sign-in path",
     "openrouter": "OPENROUTER_API_KEY",
     "huggingface": "HF_TOKEN",
     "kimi": "KIMI_API_KEY or MOONSHOT_API_KEY",
@@ -2212,23 +2212,23 @@ LLM_PROVIDER_AUTH_HINTS = {
 LLM_PROVIDER_GUIDANCE: dict[str, dict[str, Any]] = {
     "codex": {
         "lane": "paid/subscription",
-        "best_for": "Best first pick if you already have ChatGPT/Codex. Uses the Codex CLI sign-in path instead of asking for an OpenAI API key.",
+        "best_for": "Best first pick if you already use OpenAI Codex or ChatGPT. Uses the OpenAI Codex CLI sign-in path instead of asking for an OpenAI API key.",
         "recommended_models": ["gpt-5.5"],
-        "getting_started": "Install Codex CLI, sign in with `codex --login`, then run `spark setup --llm-provider codex`.",
-        "notes": "This is the OAuth-style route for OpenAI/ChatGPT users. No OpenAI API key copy-paste is needed.",
+        "getting_started": "Install OpenAI Codex CLI, sign in with `codex --login`, then run `spark setup --llm-provider codex`.",
+        "notes": "This is the OAuth-style route for OpenAI Codex and ChatGPT users. No OpenAI API key copy-paste is needed.",
     },
     "openai": {
         "lane": "api/paid",
-        "best_for": "OpenAI API users who specifically want an API-key route instead of Codex CLI sign-in.",
+        "best_for": "OpenAI API users who specifically want an API-key route instead of OpenAI Codex CLI sign-in.",
         "recommended_models": ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"],
         "getting_started": "Create an OpenAI API key, then run `spark setup --llm-provider openai --openai-api-key <key>`.",
         "notes": "Most non-technical ChatGPT users should start with `codex`; this route is for API billing/accounts.",
     },
     "anthropic": {
         "lane": "paid/subscription",
-        "best_for": "Best first pick if you already use Claude. Spark can call Claude Code through `claude -p` after you sign in.",
+        "best_for": "Best first pick if you already use Anthropic Claude. Spark can call Anthropic Claude Code through `claude -p` after you sign in.",
         "recommended_models": ["claude-sonnet-4-6", "claude-opus-4-7"],
-        "getting_started": "Install Claude Code, run `claude` once to sign in, verify `claude -p \"hello\"`, then run `spark setup --llm-provider anthropic`.",
+        "getting_started": "Install Anthropic Claude Code, run `claude` once to sign in, verify `claude -p \"hello\"`, then run `spark setup --llm-provider anthropic`.",
         "notes": "Sonnet is the daily-driver default; Opus is better for harder mission work when your plan supports it. API keys remain supported for advanced users.",
     },
     "openrouter": {
@@ -2240,10 +2240,10 @@ LLM_PROVIDER_GUIDANCE: dict[str, dict[str, Any]] = {
     },
     "zai": {
         "lane": "api/paid",
-        "best_for": "Strong API-key path for users who already have GLM/Z.AI access and want one provider for chat, memory, runtime, and missions.",
+        "best_for": "Strong API-key path for users who already have Z.AI GLM access and want one provider for chat, memory, runtime, and missions.",
         "recommended_models": ["glm-5.1"],
-        "getting_started": "Create a Z.AI key, then run `spark setup --llm-provider zai --zai-api-key <key>`.",
-        "notes": "Good default when you already have a GLM key. Spark keeps this explicit so old Ollama/local settings cannot hijack the route.",
+        "getting_started": "Create a Z.AI GLM key, then run `spark setup --llm-provider zai --zai-api-key <key>`.",
+        "notes": "Good default when you already have a Z.AI GLM key. Spark keeps this explicit so old Ollama/local settings cannot hijack the route.",
     },
     "kimi": {
         "lane": "api/paid",
@@ -2293,9 +2293,9 @@ def describe_llm_provider_setup(provider: str) -> str:
     if provider == "openai":
         status = "use OPENAI_API_KEY, or point --openai-base-url at an OpenAI-compatible server"
     elif provider == "codex":
-        status = "Codex CLI detected" if detect_codex_cli()["present"] else "run `codex` to sign in first"
+        status = "OpenAI Codex CLI detected" if detect_codex_cli()["present"] else "run `codex --login` to sign in first"
     elif provider == "anthropic":
-        status = "Claude Code detected; Spark can call it with `claude -p`" if detect_claude_code()["present"] else "use ANTHROPIC_API_KEY or run `claude` to sign in"
+        status = "Anthropic Claude Code detected; Spark can call it with `claude -p`" if detect_claude_code()["present"] else "use ANTHROPIC_API_KEY or run `claude` to sign in"
     elif provider == "ollama":
         status = "local Ollama server"
     elif provider == "openrouter":
@@ -2307,7 +2307,7 @@ def describe_llm_provider_setup(provider: str) -> str:
     elif provider == "lmstudio":
         status = "local OpenAI-compatible server at http://localhost:1234/v1"
     elif provider == "zai":
-        status = "uses the GLM coding endpoint API key"
+        status = "uses the Z.AI GLM coding endpoint API key"
     elif provider == "minimax":
         status = "uses the MiniMax OpenAI-compatible API key"
     detail = f"{LLM_PROVIDER_LABELS[provider]} ({spec['model_default']}; {auth_hint}; {lane}; {status})"
@@ -2438,9 +2438,9 @@ def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, s
     print("  This one provider powers chat, Builder, memory, retrieval, and Spawner missions.")
     print("  You can split providers later with the role-specific flags if you want advanced control.")
     print("  If you are not sure, pick based on what you already have:")
-    print("    - ChatGPT/Codex subscription or sign-in: Codex CLI OAuth")
-    print("    - Claude subscription or sign-in: Claude Code with `claude -p`")
-    print("    - API keys already handy: Z.AI, Kimi, OpenRouter, Hugging Face, MiniMax, OpenAI API")
+    print("    - OpenAI Codex subscription or sign-in: OpenAI Codex CLI OAuth")
+    print("    - Anthropic Claude subscription or sign-in: Anthropic Claude Code with `claude -p`")
+    print("    - API keys already handy: Z.AI GLM, Kimi, OpenRouter, Hugging Face, MiniMax, OpenAI API")
     print("    - Local/private first: LM Studio for desktop, Ollama for terminal")
     print(f"  Press Enter for the recommended {recommended_label} path, or type a number/provider name.")
     for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
@@ -3803,7 +3803,7 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
         role_flag = "--llm-provider" if role == "all" else f"--{role}-llm-provider"
         if provider == "not_configured":
             hints.append(
-                f"{role_label} is not configured. Run `spark setup {role_flag} codex` for Codex CLI sign-in, or choose anthropic, zai, kimi, openrouter, huggingface, minimax, lmstudio, ollama, or openai."
+                f"{role_label} is not configured. Run `spark setup {role_flag} codex` for OpenAI Codex sign-in, or choose anthropic, zai, kimi, openrouter, huggingface, minimax, lmstudio, ollama, or openai."
             )
         elif provider in {"zai", "kimi", "minimax", "openrouter", "huggingface"} and auth_mode == "not_configured":
             label = LLM_PROVIDER_LABELS.get(provider, provider)
@@ -3812,7 +3812,7 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
             )
         elif provider == "anthropic" and auth_mode == "not_configured":
             hints.append(
-                f"{role_label} uses Anthropic but neither Claude Code nor ANTHROPIC_API_KEY is configured. Run `claude` to sign in so Spark can call `claude -p`, or rerun `spark setup {role_flag} anthropic --anthropic-api-key <key>`."
+                f"{role_label} uses Anthropic Claude but neither Anthropic Claude Code nor ANTHROPIC_API_KEY is configured. Run `claude` to sign in so Spark can call `claude -p`, or rerun `spark setup {role_flag} anthropic --anthropic-api-key <key>`."
             )
         elif provider == "openai" and auth_mode == "not_configured" and openai_base_url_kind(str(state.get("base_url") or llm_state.get("base_url") or "")) == "remote_custom":
             hints.append(
@@ -3820,11 +3820,11 @@ def build_llm_repair_hints(llm_state: dict[str, Any], *, secret_keys: set[str] |
             )
         elif provider == "openai" and auth_mode == "not_configured":
             hints.append(
-                f"{role_label} uses OpenAI but OPENAI_API_KEY is not configured. Rerun `spark setup {role_flag} openai --openai-api-key <key>`, or use `spark setup {role_flag} codex` for ChatGPT/Codex sign-in."
+                f"{role_label} uses OpenAI API but OPENAI_API_KEY is not configured. Rerun `spark setup {role_flag} openai --openai-api-key <key>`, or use `spark setup {role_flag} codex` for OpenAI Codex sign-in."
             )
         elif provider == "codex" and auth_mode == "not_configured":
             hints.append(
-                f"{role_label} uses Codex but the Codex CLI is not signed in or not on PATH. Run `codex` first, then rerun `spark setup {role_flag} codex`."
+                f"{role_label} uses OpenAI Codex but the OpenAI Codex CLI is not signed in or not on PATH. Run `codex --login` first, then rerun `spark setup {role_flag} codex`."
             )
     return hints
 
@@ -3964,9 +3964,9 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     print("Need a bot token? Open @BotFather in Telegram, run /newbot, then rerun:")
     print(f"     spark setup {bundle_name}")
     print("Need to choose or change LLMs? Run `spark setup` for the guided picker, or use role flags for automation.")
-    print("Codex CLI is the easiest ChatGPT/OpenAI sign-in route. Run `codex --login`, then choose `codex` in setup.")
-    print("Claude Code is the easiest Claude sign-in route. Run `claude`, verify `claude -p \"hello\"`, then choose `anthropic` in setup.")
-    print("Z.AI, Kimi/Moonshot, OpenRouter, MiniMax, Hugging Face, and OpenAI API use API keys; Ollama and LM Studio stay local.")
+    print("OpenAI Codex CLI is the easiest OpenAI/ChatGPT sign-in route. Run `codex --login`, then choose `codex` in setup.")
+    print("Anthropic Claude Code is the easiest Claude sign-in route. Run `claude`, verify `claude -p \"hello\"`, then choose `anthropic` in setup.")
+    print("Z.AI GLM, Kimi/Moonshot, OpenRouter, MiniMax, Hugging Face, and OpenAI API use API keys; Ollama and LM Studio stay local.")
     print("For role-level control, use --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, and --mission-llm-provider.")
     print("Need to turn the agent off? Run `spark stop telegram-starter` or `spark autostart uninstall`.")
     print("Run `spark guide` anytime for BotFather, LLM, access levels, module, and Telegram command help.")
@@ -5014,7 +5014,7 @@ def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
                 "auth_mode": auth_mode,
                 "unsupported": True,
             }
-    raise SystemExit("No directly callable LLM provider is configured for Spark Doctor. Run `spark setup` and choose OpenAI, OpenRouter, Z.AI, MiniMax, Hugging Face, or Ollama for chat/builder.")
+    raise SystemExit("No directly callable LLM provider is configured for Spark Doctor. Run `spark setup` and choose OpenAI, OpenRouter, Z.AI GLM, MiniMax, Hugging Face, or Ollama for chat/builder.")
 
 
 def openai_compatible_chat_completion(target: dict[str, Any], prompt: str) -> str:
@@ -5152,7 +5152,7 @@ def call_llm_doctor(target: dict[str, Any], prompt: str) -> str:
         provider = target.get("provider")
         raise SystemExit(
             f"Spark Doctor cannot directly call {provider} via {target.get('auth_mode')} yet. "
-            "Use --prompt-out to review the redacted prompt, or configure Codex/Claude/Z.AI/Kimi/OpenRouter/Hugging Face/MiniMax/OpenAI/Ollama."
+            "Use --prompt-out to review the redacted prompt, or configure OpenAI Codex/Anthropic Claude/Z.AI GLM/Kimi/OpenRouter/Hugging Face/MiniMax/OpenAI/Ollama."
         )
     provider = target["provider"]
     if provider in {"openai", "zai", "kimi", "minimax", "openrouter", "huggingface"}:
@@ -5569,7 +5569,7 @@ def provider_catalog_payload() -> dict[str, Any]:
             },
             {
                 "id": "codex",
-                "label": "Codex CLI",
+                "label": "OpenAI Codex",
                 "auth": ["codex_oauth"],
                 "oauth_available": bool(codex["present"]),
                 "recommended_for": ["chat", "builder", "mission"],
@@ -5577,7 +5577,7 @@ def provider_catalog_payload() -> dict[str, Any]:
             },
             {
                 "id": "anthropic",
-                "label": "Anthropic",
+                "label": "Anthropic Claude",
                 "auth": ["claude_oauth", "api_key"],
                 "oauth_available": bool(claude["present"]),
                 "recommended_for": ["chat", "builder"],
@@ -5593,7 +5593,7 @@ def provider_catalog_payload() -> dict[str, Any]:
             },
             {
                 "id": "zai",
-                "label": "Z.AI / GLM",
+                "label": "Z.AI GLM",
                 "auth": ["api_key"],
                 "oauth_available": False,
                 "recommended_for": ["chat", "builder", "mission"],
@@ -5821,16 +5821,16 @@ def print_llm_provider_recommendations(payload: dict[str, Any]) -> None:
     print(payload["default_rule"])
     print("")
     print(terminal_color("Best starting points", "32;1"))
-    print("  ChatGPT/Codex subscription:  spark setup --llm-provider codex")
-    print("     Sign in first with:       codex --login")
+    print("  OpenAI Codex subscription:     spark setup --llm-provider codex")
+    print("     Sign in first with:         codex --login")
     print("")
-    print("  Claude subscription:         spark setup --llm-provider anthropic")
-    print('     Verify first with:        claude -p "hello"')
+    print("  Anthropic Claude subscription: spark setup --llm-provider anthropic")
+    print('     Verify first with:          claude -p "hello"')
     print("")
-    print("  Strong API-key route:        spark setup --llm-provider zai --zai-api-key <key>")
-    print("  Kimi/Moonshot API route:     spark setup --llm-provider kimi --kimi-api-key <key>")
-    print("  Local/private desktop route: spark setup --llm-provider lmstudio")
-    print("  Local/private terminal:      spark setup --llm-provider ollama")
+    print("  Z.AI GLM API route:            spark setup --llm-provider zai --zai-api-key <key>")
+    print("  Kimi/Moonshot API route:       spark setup --llm-provider kimi --kimi-api-key <key>")
+    print("  Local/private desktop route:   spark setup --llm-provider lmstudio")
+    print("  Local/private terminal:        spark setup --llm-provider ollama")
     print("")
     print(terminal_color("Provider guide", "32;1"))
     for provider in payload["providers"]:
@@ -8002,7 +8002,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "spark setup --agent-llm-provider zai --mission-llm-provider codex",
                 "spark setup --chat-llm-provider openai --builder-llm-provider openai --memory-llm-provider ollama --mission-llm-provider minimax",
             ],
-            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. One provider powers the Agent and Missions by default. Later, `--agent-llm-provider` can set conversation/runtime/memory together, and `--mission-llm-provider` can set Spawner build work separately. ChatGPT/OpenAI subscription users should choose Codex CLI after `codex --login`. Claude subscription users should choose Anthropic after installing Claude Code and checking `claude -p \"hello\"`. Z.AI, Kimi/Moonshot, OpenRouter, MiniMax, Hugging Face, and OpenAI API use API keys. Ollama and LM Studio are local.",
+            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. One provider powers the Agent and Missions by default. Later, `--agent-llm-provider` can set conversation/runtime/memory together, and `--mission-llm-provider` can set Spawner build work separately. OpenAI Codex or ChatGPT users should choose OpenAI Codex after `codex --login`. Anthropic Claude users should choose Anthropic Claude after installing Claude Code and checking `claude -p \"hello\"`. Z.AI GLM, Kimi/Moonshot, OpenRouter, MiniMax, Hugging Face, and OpenAI API use API keys. Ollama and LM Studio are local.",
         },
         "quick_start": [
             {"title": "Get your Telegram bot ready", "steps": [
@@ -8227,13 +8227,13 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--builder-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Expert: provider for Spark runtime reasoning and orchestration")
     setup_parser.add_argument("--memory-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for memory synthesis and recall")
     setup_parser.add_argument("--mission-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Spawner missions and coding/build work")
-    setup_parser.add_argument("--zai-api-key", help="Z.AI / GLM coding endpoint API key, @clipboard, @env:NAME, or @file:path")
+    setup_parser.add_argument("--zai-api-key", help="Z.AI GLM coding endpoint API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--zai-base-url", default="https://api.z.ai/api/coding/paas/v4/")
     setup_parser.add_argument("--zai-model", default="glm-5.1")
     setup_parser.add_argument("--openai-api-key", help="OpenAI API key, @clipboard, @env:NAME, or @file:path; optional for local OpenAI-compatible servers")
     setup_parser.add_argument("--openai-base-url", default="https://api.openai.com/v1", help="OpenAI-compatible base URL, for example https://api.openai.com/v1 or http://localhost:1234/v1 for LM Studio")
     setup_parser.add_argument("--openai-model", default="gpt-5.5", help="OpenAI/OpenAI-compatible model name")
-    setup_parser.add_argument("--anthropic-api-key", help="Anthropic API key, @clipboard, @env:NAME, or @file:path")
+    setup_parser.add_argument("--anthropic-api-key", help="Anthropic Claude API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--anthropic-base-url", default="https://api.anthropic.com")
     setup_parser.add_argument("--anthropic-model", default="claude-sonnet-4.5")
     setup_parser.add_argument("--openrouter-api-key", help="OpenRouter API key, @clipboard, @env:NAME, or @file:path")
