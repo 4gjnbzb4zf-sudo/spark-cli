@@ -2136,7 +2136,7 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
         "base_url_default": "http://localhost:11434",
         "model_arg": "ollama_model",
         "model_env": "OLLAMA_MODEL",
-        "model_default": "kimi-k2.5:cloud",
+        "model_default": "llama3.2:3b",
         "bot_provider": "ollama",
     },
     "codex": {
@@ -8036,7 +8036,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--minimax-base-url", default="https://api.minimax.io/v1")
     setup_parser.add_argument("--minimax-model", default="MiniMax-M2.7")
     setup_parser.add_argument("--ollama-url", default="http://localhost:11434")
-    setup_parser.add_argument("--ollama-model", default="kimi-k2.5:cloud")
+    setup_parser.add_argument("--ollama-model", default="llama3.2:3b")
     setup_parser.add_argument("--codex-model", default="gpt-5.5")
     setup_parser.set_defaults(func=cmd_setup)
 
