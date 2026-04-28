@@ -123,12 +123,20 @@ Volume mount: /data/spark
 Set secrets in Railway Variables, never in source control:
 
 ```text
+RAILWAY_DOCKERFILE_PATH=docker/live/Dockerfile
+RAILWAY_RUN_UID=0
+SPARK_ALLOWED_HOSTS=<your-railway-domain>.up.railway.app
 TELEGRAM_BOT_TOKEN
 TELEGRAM_ADMIN_IDS
 SPARK_LLM_PROVIDER
 ZAI_API_KEY / OPENAI_API_KEY / etc.
 SPARK_SPAWNER_PORT=${PORT}
 ```
+
+`RAILWAY_RUN_UID=0` is required when using Railway volumes with this image because
+Railway mounts volumes as `root`; without it, Spark cannot create `/data/spark/state`.
+`SPARK_ALLOWED_HOSTS` lets Spawner's Vite server accept the generated Railway
+domain without disabling host-header protection for every possible host.
 
 After deploy:
 
