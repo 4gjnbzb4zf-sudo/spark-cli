@@ -624,7 +624,7 @@ class SparkCliTests(unittest.TestCase):
         target = {
             "provider": "anthropic",
             "role": "chat",
-            "model": "claude-sonnet-4.5",
+            "model": "sonnet",
             "auth_mode": "claude_oauth",
             "cli_path": "claude",
         }
@@ -635,7 +635,31 @@ class SparkCliTests(unittest.TestCase):
         command = run_mock.call_args.args[0]
         self.assertEqual(command[:3], ["claude", "-p", "--output-format"])
         self.assertIn("--model", command)
-        self.assertIn("claude-sonnet-4.5", command)
+        self.assertIn("sonnet", command)
+
+    def test_provider_test_wraps_windows_claude_powershell_shim(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["powershell"],
+            0,
+            stdout="PING_OK\n",
+            stderr="",
+        )
+        target = {
+            "provider": "anthropic",
+            "role": "chat",
+            "model": "sonnet",
+            "auth_mode": "claude_oauth",
+            "cli_path": r"C:\nvm\nodejs\claude.ps1",
+        }
+        with patch("spark_cli.cli.os.name", "nt"), \
+             patch("spark_cli.cli.subprocess.run", return_value=completed) as run_mock, \
+             patch("spark_cli.cli.llm_cli_cwd", return_value=str(Path.cwd())):
+            response = call_llm_doctor(target, "Reply with exactly PING_OK. No extra words.")
+        self.assertEqual(response, "PING_OK")
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:5], ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        self.assertIn(r"C:\nvm\nodejs\claude.ps1", command)
+        self.assertIn("--model", command)
 
     def test_provider_test_explicit_codex_uses_codex_oauth_defaults(self) -> None:
         setup_state = {
@@ -676,7 +700,7 @@ class SparkCliTests(unittest.TestCase):
             target = resolve_provider_test_target("chat", "anthropic")
         self.assertEqual(target["provider"], "anthropic")
         self.assertEqual(target["auth_mode"], "claude_oauth")
-        self.assertEqual(target["model"], "claude-sonnet-4.5")
+        self.assertEqual(target["model"], "sonnet")
         self.assertEqual(target["cli_path"], "claude")
 
     def test_new_user_experience_commands_parse(self) -> None:
@@ -4461,7 +4485,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(providers["openai"]["recommended_models"][0], "gpt-5.5")
         self.assertIn("kimi-k2.6", providers["kimi"]["recommended_models"])
         self.assertIn("gpt-5.4-mini", providers["openai"]["recommended_models"])
-        self.assertIn("claude-opus-4-7", providers["anthropic"]["recommended_models"])
+        self.assertIn("opus", providers["anthropic"]["recommended_models"])
         self.assertIn("google/gemma-4-31B-it:fastest", providers["huggingface"]["recommended_models"])
         self.assertEqual(providers["lmstudio"]["lane"], "local/free after download")
 

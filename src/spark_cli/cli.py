@@ -1546,6 +1546,13 @@ def setup_is_interactive(args: argparse.Namespace) -> bool:
 
 
 def detect_claude_code() -> dict[str, Any]:
+    if os.name == "nt":
+        for raw_dir in os.environ.get("PATH", "").split(os.pathsep):
+            if not raw_dir:
+                continue
+            candidate = Path(raw_dir) / "claude.ps1"
+            if candidate.exists():
+                return {"present": True, "path": str(candidate)}
     path = shutil.which("claude")
     return {"present": bool(path), "path": path}
 
@@ -2139,7 +2146,7 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
         "base_url_default": "https://api.anthropic.com",
         "model_arg": "anthropic_model",
         "model_env": "ANTHROPIC_MODEL",
-        "model_default": "claude-sonnet-4.5",
+        "model_default": "sonnet",
         "bot_provider": "claude",
     },
     "minimax": {
@@ -2227,14 +2234,14 @@ LLM_PROVIDER_GUIDANCE: dict[str, dict[str, Any]] = {
     "anthropic": {
         "lane": "paid/subscription",
         "best_for": "Best first pick if you already use Anthropic Claude. Spark can call Anthropic Claude Code through `claude -p` after you sign in.",
-        "recommended_models": ["claude-sonnet-4-6", "claude-opus-4-7"],
+        "recommended_models": ["sonnet", "opus"],
         "getting_started": "Install Anthropic Claude Code, run `claude` once to sign in, verify `claude -p \"hello\"`, then run `spark setup --llm-provider anthropic`.",
-        "notes": "Sonnet is the daily-driver default; Opus is better for harder mission work when your plan supports it. API keys remain supported for advanced users.",
+        "notes": "Claude Code accepts stable aliases like `sonnet` and `opus`; use full Anthropic model IDs only when you know your installed Claude Code supports them. API keys remain supported for advanced users.",
     },
     "openrouter": {
         "lane": "api/paid gateway",
         "best_for": "Trying many commercial/open models behind one API key.",
-        "recommended_models": ["openai/gpt-5.5", "anthropic/claude-sonnet-4.6"],
+        "recommended_models": ["openai/gpt-5.5", "anthropic/claude-sonnet-4"],
         "getting_started": "Create an OpenRouter key, then run `spark setup --llm-provider openrouter --openrouter-api-key <key>`.",
         "notes": "Good if you want one billing/gateway surface and model fallback experiments.",
     },
@@ -5181,7 +5188,20 @@ def codex_cli_completion(target: dict[str, Any], prompt: str) -> str:
 
 def claude_cli_completion(target: dict[str, Any], prompt: str) -> str:
     claude_path = str(target.get("cli_path") or shutil.which("claude") or "claude")
-    command = [claude_path, "-p", "--output-format", "text"]
+    if os.name == "nt" and claude_path.lower().endswith(".ps1"):
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            claude_path,
+            "-p",
+            "--output-format",
+            "text",
+        ]
+    else:
+        command = [claude_path, "-p", "--output-format", "text"]
     model = str(target.get("model") or "").strip()
     if model:
         command.extend(["--model", model])
@@ -8296,7 +8316,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--openai-model", default="gpt-5.5", help="OpenAI/OpenAI-compatible model name")
     setup_parser.add_argument("--anthropic-api-key", help="Anthropic Claude API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--anthropic-base-url", default="https://api.anthropic.com")
-    setup_parser.add_argument("--anthropic-model", default="claude-sonnet-4.5")
+    setup_parser.add_argument("--anthropic-model", default="sonnet")
     setup_parser.add_argument("--openrouter-api-key", help="OpenRouter API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--openrouter-base-url", default="https://openrouter.ai/api/v1")
     setup_parser.add_argument("--openrouter-model", default="openai/gpt-5.5")
