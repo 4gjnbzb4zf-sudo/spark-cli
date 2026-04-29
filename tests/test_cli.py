@@ -3182,6 +3182,36 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark-telegram-bot:spark-agi", labels)
         self.assertIn("spark-telegram-bot:testerthebester", labels)
 
+    def test_live_verify_runs_hosted_deep_gate_by_default(self) -> None:
+        args = build_parser().parse_args(["live", "verify", "--json"])
+        payload = {
+            "ok": True,
+            "summary": "Spark hosted security verification",
+            "checks": [{"name": "hosted_deep_mission_smoke", "ok": True, "detail": "ready"}],
+        }
+
+        with patch("spark_cli.cli.collect_hosted_security_payload", return_value=payload) as collect_mock, \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cmd_live(args), 0)
+
+        collect_mock.assert_called_once_with(deep=True)
+        self.assertIn("hosted_deep_mission_smoke", stdout.getvalue())
+
+    def test_live_verify_quick_skips_hosted_deep_gate(self) -> None:
+        args = build_parser().parse_args(["live", "verify", "--quick"])
+        payload = {
+            "ok": False,
+            "summary": "Spark hosted security verification",
+            "checks": [{"name": "allowed_hosts", "ok": False, "detail": "missing", "repair": "set hosts"}],
+        }
+
+        with patch("spark_cli.cli.collect_hosted_security_payload", return_value=payload) as collect_mock, \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cmd_live(args), 1)
+
+        collect_mock.assert_called_once_with(deep=False)
+        self.assertIn("[FIX] allowed_hosts: missing", stdout.getvalue())
+
     def test_collect_secret_requirements_maps_manifest_secret_blocks(self) -> None:
         module = Module(
             name="spark-telegram-bot",

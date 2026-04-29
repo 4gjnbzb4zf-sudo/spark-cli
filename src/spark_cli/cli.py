@@ -4545,6 +4545,13 @@ def cmd_live(args: argparse.Namespace) -> int:
         if getattr(args, "follow", False):
             follow_live_logs(lines=0)
         return 0
+    if command == "verify":
+        payload = collect_hosted_security_payload(deep=not bool(getattr(args, "quick", False)))
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["ok"] else 1
+        print_hosted_security_payload(payload)
+        return 0 if payload["ok"] else 1
     if command == "status":
         return cmd_live_status(args)
     raise SystemExit(f"Unknown live command: {command}")
@@ -6779,6 +6786,15 @@ def onboarding_checklist() -> list[str]:
     ]
 
 
+def print_hosted_security_payload(payload: dict[str, Any]) -> None:
+    print(payload["summary"])
+    for check in payload["checks"]:
+        marker = "[OK]" if check["ok"] else "[FIX]"
+        print(f"{marker} {check['name']}: {check['detail']}")
+        if not check["ok"] and check.get("repair"):
+            print(f"      {check['repair']}")
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     if getattr(args, "registry_pins", False):
         payload = collect_registry_pin_drift_payload()
@@ -6827,12 +6843,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(payload, indent=2))
             return 0 if payload["ok"] else 1
-        print(payload["summary"])
-        for check in payload["checks"]:
-            marker = "[OK]" if check["ok"] else "[FIX]"
-            print(f"{marker} {check['name']}: {check['detail']}")
-            if not check["ok"] and check.get("repair"):
-                print(f"      {check['repair']}")
+        print_hosted_security_payload(payload)
         return 0 if payload["ok"] else 1
 
     onboarding = bool(getattr(args, "onboarding", False))
@@ -9100,6 +9111,10 @@ def build_parser() -> argparse.ArgumentParser:
     live_logs_parser.add_argument("-n", "--lines", type=int, default=80)
     live_logs_parser.add_argument("-f", "--follow", action="store_true", help="Keep watching combined Spark Live logs")
     live_logs_parser.set_defaults(func=cmd_live)
+    live_verify_parser = live_subparsers.add_parser("verify", help="Run the hosted Spark Live release gate")
+    live_verify_parser.add_argument("--json", action="store_true")
+    live_verify_parser.add_argument("--quick", action="store_true", help="Skip the deep hosted mission smoke")
+    live_verify_parser.set_defaults(func=cmd_live)
     live_parser.set_defaults(func=cmd_live, live_command="status")
 
     autostart_parser = subparsers.add_parser("autostart", help="Start Spark automatically when this computer logs in")
