@@ -6018,8 +6018,8 @@ class SparkCliTests(unittest.TestCase):
                 "SPARK_LLM_PROVIDER": "zai",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
-                "SPARK_BRIDGE_API_KEY": "bridge",
-                "SPARK_UI_API_KEY": "ui",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
             },
             clear=True,
         ), patch("spark_cli.cli.current_uid", return_value=1000), \
@@ -6041,8 +6041,8 @@ class SparkCliTests(unittest.TestCase):
                 "SPARK_LLM_PROVIDER": "zai",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
-                "SPARK_BRIDGE_API_KEY": "bridge",
-                "SPARK_UI_API_KEY": "ui",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
             },
             clear=True,
         ), patch("spark_cli.cli.current_uid", return_value=0), \
@@ -6078,6 +6078,79 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(checks["hosted_api_keys"]["ok"])
         self.assertFalse(checks["headless_provider"]["ok"])
 
+    def test_collect_hosted_security_payload_flags_weak_hosted_keys(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "changeme",
+                "SPARK_UI_API_KEY": "changeme",
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["hosted_api_keys"]["ok"])
+        self.assertIn("placeholder", checks["hosted_api_keys"]["detail"])
+        self.assertIn("must be different", checks["hosted_api_keys"]["detail"])
+
+    def test_collect_hosted_security_payload_flags_broad_allowed_hosts(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "*",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["allowed_hosts"]["ok"])
+        self.assertIn("wildcards", checks["allowed_hosts"]["detail"])
+
+    def test_collect_hosted_security_payload_flags_loose_secret_file_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            secret_file = Path(temp_dir) / "secrets.local.json"
+            secret_file.write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "SPARK_HOME": "/data/spark",
+                    "SPARK_LLM_PROVIDER": "zai",
+                    "SPARK_SPAWNER_HOST": "0.0.0.0",
+                    "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                    "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                    "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+                },
+                clear=True,
+            ), patch("spark_cli.cli.current_uid", return_value=1000), \
+                patch("spark_cli.cli.docker_socket_present", return_value=False), \
+                patch("spark_cli.cli.SECRETS_FILE_PATH", secret_file), \
+                patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+                if os.name != "nt":
+                    secret_file.chmod(0o644)
+                payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        if os.name == "nt":
+            self.assertTrue(checks["hosted_secret_file_permissions"]["ok"])
+        else:
+            self.assertFalse(payload["ok"])
+            self.assertFalse(checks["hosted_secret_file_permissions"]["ok"])
+            self.assertIn("0600", checks["hosted_secret_file_permissions"]["detail"])
+
     def test_collect_hosted_security_payload_deep_appends_mission_smoke(self) -> None:
         with patch.dict(
             os.environ,
@@ -6086,8 +6159,8 @@ class SparkCliTests(unittest.TestCase):
                 "SPARK_LLM_PROVIDER": "zai",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
-                "SPARK_BRIDGE_API_KEY": "bridge",
-                "SPARK_UI_API_KEY": "ui",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
             },
             clear=True,
         ), patch("spark_cli.cli.current_uid", return_value=1000), \

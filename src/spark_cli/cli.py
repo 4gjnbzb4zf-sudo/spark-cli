@@ -6392,6 +6392,79 @@ def hosted_spark_home_is_safe(value: str) -> bool:
     return not any(candidate in hosted_unsafe_home_paths() for candidate in candidates)
 
 
+HOSTED_WEAK_SECRET_MARKERS = {
+    "***",
+    "admin",
+    "changeme",
+    "change-me",
+    "change-me-now",
+    "default",
+    "dev",
+    "password",
+    "placeholder",
+    "secret",
+    "spark",
+    "test",
+    "token",
+    "your_api_key",
+}
+
+
+def hosted_api_key_strength_errors(ui_key: str, bridge_key: str) -> list[str]:
+    errors: list[str] = []
+    values = {
+        "SPARK_UI_API_KEY": (ui_key or "").strip(),
+        "SPARK_BRIDGE_API_KEY": (bridge_key or "").strip(),
+    }
+    for name, value in values.items():
+        lowered = value.lower()
+        if not value:
+            errors.append(f"{name} is missing.")
+            continue
+        if any(char.isspace() for char in value):
+            errors.append(f"{name} contains whitespace.")
+        if len(value) < 24:
+            errors.append(f"{name} is shorter than 24 characters.")
+        if lowered in HOSTED_WEAK_SECRET_MARKERS or any(
+            marker in lowered for marker in ("changeme", "password", "placeholder")
+        ):
+            errors.append(f"{name} looks like a placeholder.")
+    if values["SPARK_UI_API_KEY"] and values["SPARK_UI_API_KEY"] == values["SPARK_BRIDGE_API_KEY"]:
+        errors.append("SPARK_UI_API_KEY and SPARK_BRIDGE_API_KEY must be different.")
+    return errors
+
+
+def hosted_allowed_host_errors(allowed_hosts: list[str]) -> list[str]:
+    errors: list[str] = []
+    blocked = {"*", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"}
+    for host in allowed_hosts:
+        normalized = host.strip().lower()
+        if normalized in blocked:
+            errors.append(f"SPARK_ALLOWED_HOSTS contains unsafe host {host!r}.")
+        if "*" in normalized:
+            errors.append(f"SPARK_ALLOWED_HOSTS must not contain wildcards ({host!r}).")
+        if "://" in normalized or "/" in normalized:
+            errors.append(f"SPARK_ALLOWED_HOSTS must contain hostnames only, not URLs ({host!r}).")
+    return errors
+
+
+def hosted_secret_file_permission_errors(paths: list[Path] | None = None) -> list[str]:
+    if os.name == "nt":
+        return []
+    errors: list[str] = []
+    for path in paths or [SECRETS_FILE_PATH]:
+        try:
+            mode = path.stat().st_mode & 0o777
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"Could not inspect {path}: {exc}.")
+            continue
+        if mode & 0o077:
+            errors.append(f"{path} is {oct(mode)}; hosted secret files should be 0600.")
+    return errors
+
+
 def hosted_spawner_base_url() -> str:
     port = (
         os.environ.get("SPARK_SPAWNER_PORT")
@@ -6481,6 +6554,11 @@ def hosted_deep_mission_smoke(timeout_seconds: int = 90) -> dict[str, Any]:
 def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
     provider = (os.environ.get("SPARK_LLM_PROVIDER") or "").strip().lower()
     allowed_hosts = [host.strip() for host in (os.environ.get("SPARK_ALLOWED_HOSTS") or "").split(",") if host.strip()]
+    allowed_host_errors = hosted_allowed_host_errors(allowed_hosts)
+    ui_key = os.environ.get("SPARK_UI_API_KEY") or ""
+    bridge_key = os.environ.get("SPARK_BRIDGE_API_KEY") or ""
+    hosted_key_errors = hosted_api_key_strength_errors(ui_key, bridge_key)
+    secret_file_errors = hosted_secret_file_permission_errors()
     spawner_host = (os.environ.get("SPARK_SPAWNER_HOST") or "").strip()
     public_bind = spawner_host in {"0.0.0.0", "::"} or bool(allowed_hosts)
     runtime_uids = tracked_runtime_uids()
@@ -6526,26 +6604,33 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
         },
         {
             "name": "allowed_hosts",
-            "ok": (not public_bind) or bool(allowed_hosts),
+            "ok": ((not public_bind) or bool(allowed_hosts)) and not allowed_host_errors,
             "required": True,
             "detail": (
-                f"Spawner public host allowlist: {', '.join(allowed_hosts)}."
-                if allowed_hosts
-                else "Spawner is publicly bound but SPARK_ALLOWED_HOSTS is not configured."
+                "; ".join(allowed_host_errors)
+                if allowed_host_errors
+                else (
+                    f"Spawner public host allowlist: {', '.join(allowed_hosts)}."
+                    if allowed_hosts
+                    else "Spawner is publicly bound but SPARK_ALLOWED_HOSTS is not configured."
+                )
             ),
-            "repair": "Set SPARK_ALLOWED_HOSTS to the exact hosted domain.",
+            "repair": "Set SPARK_ALLOWED_HOSTS to the exact hosted domain, with no scheme, path, wildcard, or loopback host.",
         },
         {
             "name": "hosted_api_keys",
-            "ok": (not public_bind)
-            or (bool(os.environ.get("SPARK_BRIDGE_API_KEY")) and bool(os.environ.get("SPARK_UI_API_KEY"))),
+            "ok": (not public_bind) or not hosted_key_errors,
             "required": True,
             "detail": (
+                "; ".join(hosted_key_errors)
+                if hosted_key_errors and public_bind
+                else (
                 "Hosted UI and bridge API keys are configured; Spark Live maps the bridge key to control/event routes at startup."
-                if bool(os.environ.get("SPARK_BRIDGE_API_KEY")) and bool(os.environ.get("SPARK_UI_API_KEY"))
-                else "Hosted/public Spawner needs SPARK_UI_API_KEY plus SPARK_BRIDGE_API_KEY."
+                    if bool(bridge_key) and bool(ui_key)
+                    else "Hosted/public Spawner needs SPARK_UI_API_KEY plus SPARK_BRIDGE_API_KEY."
+                )
             ),
-            "repair": "Set SPARK_UI_API_KEY and SPARK_BRIDGE_API_KEY as platform secrets.",
+            "repair": "Set different random SPARK_UI_API_KEY and SPARK_BRIDGE_API_KEY platform secrets, at least 24 characters each.",
         },
         {
             "name": "headless_provider",
@@ -6557,6 +6642,21 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
                 else "Codex OAuth is interactive and should not be used in hosted Docker/Railway."
             ),
             "repair": "Use openai, zai, openrouter, kimi, huggingface, minimax, or anthropic API-key mode for hosted Spark.",
+        },
+        {
+            "name": "hosted_secret_file_permissions",
+            "ok": not secret_file_errors,
+            "required": True,
+            "detail": (
+                "; ".join(secret_file_errors)
+                if secret_file_errors
+                else (
+                    "Hosted secret files are private on this platform."
+                    if os.name != "nt"
+                    else "Windows hosted secret file permissions are handled by the OS/keychain path."
+                )
+            ),
+            "repair": "Run `chmod 600 ~/.spark/config/secrets.local.json` or rerun `spark setup` so Spark can harden the secret file.",
         },
     ]
 

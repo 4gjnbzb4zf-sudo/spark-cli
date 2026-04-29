@@ -155,8 +155,8 @@ Set secrets in Railway Variables, never in source control:
 RAILWAY_DOCKERFILE_PATH=docker/live/Dockerfile
 RAILWAY_RUN_UID=0
 SPARK_ALLOWED_HOSTS=<your-railway-domain>.up.railway.app
-SPARK_UI_API_KEY=<random-ui-password>
-SPARK_BRIDGE_API_KEY=<random-api-password>
+SPARK_UI_API_KEY=<different-random-secret-at-least-24-chars>
+SPARK_BRIDGE_API_KEY=<different-random-secret-at-least-24-chars>
 TELEGRAM_BOT_TOKEN
 TELEGRAM_ADMIN_IDS
 SPARK_LLM_PROVIDER
@@ -167,7 +167,8 @@ SPARK_SPAWNER_PORT=${PORT}
 `RAILWAY_RUN_UID=0` lets the entrypoint repair Railway volume ownership. Spark then
 drops to the non-root `spark` user before setup and runtime work starts.
 `SPARK_ALLOWED_HOSTS` lets Spawner's Vite server accept the generated Railway
-domain without disabling host-header protection for every possible host.
+domain without disabling host-header protection for every possible host. Use
+hostnames only: no `https://`, no paths, no wildcards, no loopback values.
 `SPARK_UI_API_KEY` protects the hosted Spawner UI. Open the Railway URL and Spark
 will redirect browser users to `/spark-live/login`; paste the UI key there to set
 an httpOnly browser cookie. The `?uiKey=<SPARK_UI_API_KEY>` route remains
@@ -194,6 +195,11 @@ uses the configured mission provider and may spend real LLM credits.
 - Keep sandbox API keys scoped and revocable.
 - Prefer separate hosted sandbox provider keys from the operator's main personal keys.
 - Require `SPARK_UI_API_KEY` and `SPARK_BRIDGE_API_KEY` before exposing Spawner on a public host.
+- Make `SPARK_UI_API_KEY` and `SPARK_BRIDGE_API_KEY` different random values,
+  at least 24 characters each. Do not use placeholders such as `changeme`,
+  `password`, `secret`, or `spark`.
+- Keep hosted secret files private. `spark verify --hosted` fails if a POSIX
+  `secrets.local.json` is group/world-readable.
 - Do not mount or copy a real local `~/.spark` into hosted containers.
 - Never mount `/var/run/docker.sock`, `/`, `/root`, cloud credential directories, SSH keys, or browser profiles.
 - Prefer Docker hardening flags on VPS: `--cap-drop=ALL`, `--security-opt no-new-privileges`, resource limits, and only one writable Spark state volume.
