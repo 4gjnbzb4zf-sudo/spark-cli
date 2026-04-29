@@ -534,6 +534,26 @@ class ModuleProvenanceResult:
 class ReportOnlyModuleProvenanceVerifier:
     """Non-enforcing verifier surface for future Sigstore/attestation checks."""
 
+    def attestation_warnings(self, metadata: dict[str, Any], *, source: str, commit: str) -> list[str]:
+        raw = metadata.get("attestation")
+        if raw is None and metadata.get("attestation_ref"):
+            return []
+        if raw is None:
+            return ["module attestation is not declared yet"]
+        if not isinstance(raw, dict):
+            return ["module attestation must be an object"]
+        warnings: list[str] = []
+        attestation_type = str(raw.get("type") or "").strip()
+        if attestation_type != "git-commit-pin-v1":
+            warnings.append("module attestation type must be git-commit-pin-v1")
+        attested_source = str(raw.get("source") or "").strip()
+        if attested_source != source:
+            warnings.append("module attestation source does not match registry source")
+        attested_commit = str(raw.get("commit") or "").strip().lower()
+        if attested_commit != commit.lower():
+            warnings.append("module attestation commit does not match registry commit")
+        return warnings
+
     def verify_registry_entry(self, name: str, metadata: dict[str, Any]) -> ModuleProvenanceResult:
         source = str(metadata.get("source", "")).strip()
         commit = str(metadata.get("commit", "")).strip()
@@ -555,8 +575,9 @@ class ReportOnlyModuleProvenanceVerifier:
                 warnings.append("module is missing a full commit pin")
         if not signature_enforced:
             warnings.append("commit signature enforcement is report-only")
-        if not attestation_present:
-            warnings.append("module attestation is not declared yet")
+        warnings.extend(self.attestation_warnings(metadata, source=source, commit=commit))
+        if any("attestation" in warning and warning != "module attestation is not declared yet" for warning in warnings):
+            ok = False
         detail = (
             "Commit pin is present; signature and attestation checks are report-only."
             if ok

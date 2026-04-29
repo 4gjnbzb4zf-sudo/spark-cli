@@ -2588,6 +2588,35 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("module is missing a full commit pin", payload["checks"][0]["warnings"])
 
+    def test_module_provenance_report_flags_mismatched_attestation(self) -> None:
+        registry = {
+            "modules": {
+                "spark-telegram-bot": {
+                    "source": "https://github.com/vibeforge1111/spark-telegram-bot",
+                    "commit": "a" * 40,
+                    "require_signed_commit": False,
+                    "blessed": True,
+                    "attestation": {
+                        "type": "git-commit-pin-v1",
+                        "source": "https://github.com/vibeforge1111/spark-telegram-bot",
+                        "commit": "b" * 40,
+                    },
+                }
+            },
+            "bundles": {},
+        }
+
+        payload = collect_module_provenance_payload(registry=registry)
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("module attestation commit does not match registry commit", payload["checks"][0]["warnings"])
+
+    def test_committed_registry_declares_module_attestations(self) -> None:
+        payload = collect_module_provenance_payload()
+        for check in payload["checks"]:
+            self.assertTrue(check["attestation_present"], check["name"])
+            self.assertNotIn("module attestation is not declared yet", check["warnings"])
+
     def test_registry_pin_drift_payload_detects_lagging_blessed_module(self) -> None:
         registry = {
             "modules": {
