@@ -32,6 +32,7 @@ import tomllib
 
 from .runtime_policy import run_runtime_command, runtime_command_argv, split_single_argv_command
 from .security.approval import CommandContext, approval_required_for_command
+from .security.url_policy import UrlPolicy, validate_url_safety
 
 CLI_MAX_SUPPORTED_SCHEMA = 1
 DPAPI_SECRET_PREFIX = "dpapi:v1:"
@@ -5251,13 +5252,6 @@ def dependency_lockfile_errors() -> list[str]:
     return errors
 
 
-UNSAFE_ENDPOINT_HOSTS = {
-    "0.0.0.0",
-    "::",
-    "metadata.google.internal",
-}
-
-
 def endpoint_security_errors() -> list[str]:
     errors: list[str] = []
     provider_payload = provider_status_payload()
@@ -5276,28 +5270,13 @@ def endpoint_security_errors() -> list[str]:
                     urls.append((f"{env_name}:{key}", raw_url.strip()))
 
     for label, raw_url in urls:
-        if not raw_url or raw_url.startswith("${"):
-            continue
-        parsed = urllib.parse.urlparse(raw_url if "://" in raw_url else f"http://{raw_url}")
-        if parsed.scheme not in {"http", "https"}:
-            errors.append(f"{label} uses unsupported URL scheme `{parsed.scheme}`.")
-            continue
-        host = (parsed.hostname or "").strip().lower()
-        if not host:
-            errors.append(f"{label} has a URL without a hostname.")
-            continue
-        if host in UNSAFE_ENDPOINT_HOSTS:
-            errors.append(f"{label} points at unsafe host `{host}`.")
-        try:
-            ip = ipaddress.ip_address(host.strip("[]"))
-        except ValueError:
-            ip = None
-        if ip is not None and (ip.is_unspecified or ip.is_multicast or ip.is_link_local):
-            errors.append(f"{label} points at unsafe network address `{host}`.")
-        if host == "169.254.169.254":
-            errors.append(f"{label} points at cloud metadata service address 169.254.169.254.")
-        if host not in {"localhost", "127.0.0.1", "::1"} and parsed.scheme != "https":
-            errors.append(f"{label} uses non-HTTPS remote endpoint `{raw_url}`.")
+        errors.extend(
+            validate_url_safety(
+                raw_url,
+                label=label,
+                policy=UrlPolicy(allow_local=True, allow_private_networks=False, require_https_for_remote=True),
+            )
+        )
     return errors
 
 

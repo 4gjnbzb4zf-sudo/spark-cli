@@ -238,6 +238,7 @@ from spark_cli.cli import (
     mountinfo_mountpoints,
 )
 from spark_cli.security.approval import CommandContext, approval_required_for_command
+from spark_cli.security.url_policy import UrlPolicy, validate_url_safety
 
 
 def make_module(name: str, capabilities: list[str], secrets: list[str] | None = None) -> Module:
@@ -930,6 +931,18 @@ class SparkCliTests(unittest.TestCase):
              patch("spark_cli.cli.read_generated_env", return_value={}):
             errors = endpoint_security_errors()
         self.assertTrue(any("169.254.169.254" in error for error in errors))
+
+    def test_url_policy_blocks_private_remote_targets(self) -> None:
+        errors = validate_url_safety("http://10.0.0.8/v1", label="llm role chat")
+        self.assertTrue(any("private network address" in error for error in errors))
+
+    def test_url_policy_allows_local_provider_targets_by_default(self) -> None:
+        errors = validate_url_safety("http://localhost:1234/v1", label="LM Studio")
+        self.assertEqual(errors, [])
+
+    def test_url_policy_can_block_local_targets_for_hosted_tools(self) -> None:
+        errors = validate_url_safety("http://127.0.0.1:11434", label="hosted provider", policy=UrlPolicy(allow_local=False))
+        self.assertTrue(any("local-only host" in error for error in errors))
 
     def test_provider_test_uses_configured_target_and_redacts_failures(self) -> None:
         with patch("spark_cli.cli.resolve_provider_test_target", return_value={
