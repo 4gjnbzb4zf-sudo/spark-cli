@@ -30,6 +30,7 @@ from xml.sax.saxutils import escape as xml_escape
 import tomllib
 
 from .runtime_policy import run_runtime_command, runtime_command_argv, split_single_argv_command
+from .security.approval import CommandContext, approval_required_for_command
 
 CLI_MAX_SUPPORTED_SCHEMA = 1
 DPAPI_SECRET_PREFIX = "dpapi:v1:"
@@ -4940,6 +4941,44 @@ def cmd_security(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def cmd_approval(args: argparse.Namespace) -> int:
+    if args.approval_command != "classify":
+        raise SystemExit(f"Unknown approval command: {args.approval_command}")
+    command = list(args.command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise SystemExit("Usage: spark approval classify -- <command>")
+    decision = approval_required_for_command(
+        command,
+        CommandContext(
+            surface=str(getattr(args, "surface", "cli") or "cli"),
+            hosted=bool(getattr(args, "hosted", False)),
+            non_interactive=bool(getattr(args, "non_interactive", False)),
+        ),
+    )
+    payload = {
+        "ok": True,
+        "mode": "report_only",
+        "decision": decision.to_dict(),
+        "note": "Report-only classifier. Spark is not enforcing this decision yet.",
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    print("Spark approval classifier")
+    print(f"Class: {decision.action_class}")
+    print(f"Risk: {decision.risk}")
+    print(f"Requires approval: {'yes' if decision.requires_approval else 'no'}")
+    print(f"Reason: {decision.reason}")
+    if decision.target_display:
+        print(f"Target: {decision.target_display}")
+    if decision.confirmation_phrase:
+        print(f"Confirmation phrase: {decision.confirmation_phrase}")
+    print("Mode: report-only")
+    return 0
+
+
 def redact_sensitive_text(value: str) -> str:
     redacted = str(value)
     for pattern in SENSITIVE_VALUE_PATTERNS:
@@ -8929,6 +8968,16 @@ def build_parser() -> argparse.ArgumentParser:
     security_audit_parser.add_argument("--deep", action="store_true", help="Include deep verification checks")
     security_audit_parser.add_argument("--json", action="store_true")
     security_audit_parser.set_defaults(func=cmd_security)
+
+    approval_parser = subparsers.add_parser("approval", help="Classify sensitive Spark actions before enforcement")
+    approval_subparsers = approval_parser.add_subparsers(dest="approval_command", required=True)
+    approval_classify_parser = approval_subparsers.add_parser("classify", help="Report whether a command should require approval")
+    approval_classify_parser.add_argument("--json", action="store_true")
+    approval_classify_parser.add_argument("--hosted", action="store_true", help="Classify as a hosted/VPS action")
+    approval_classify_parser.add_argument("--surface", default="cli", help="Surface requesting the action, for example cli, telegram, or spark-live")
+    approval_classify_parser.add_argument("--non-interactive", action="store_true", help="Classify as a non-interactive call")
+    approval_classify_parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to classify; use -- before the command")
+    approval_classify_parser.set_defaults(func=cmd_approval)
 
     telegram_parser = subparsers.add_parser("telegram", help="Connect and manage Telegram bots")
     telegram_sub = telegram_parser.add_subparsers(dest="telegram_command", required=True)

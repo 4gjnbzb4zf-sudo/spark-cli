@@ -223,6 +223,7 @@ from spark_cli.cli import (
     write_runtime_shim,
     telegram_profile_secret_id,
 )
+from spark_cli.security.approval import CommandContext, approval_required_for_command
 
 
 def make_module(name: str, capabilities: list[str], secrets: list[str] | None = None) -> Module:
@@ -256,6 +257,44 @@ def make_module(name: str, capabilities: list[str], secrets: list[str] | None = 
 
 
 class SparkCliTests(unittest.TestCase):
+    def test_approval_classifier_allows_harmless_status(self) -> None:
+        decision = approval_required_for_command(["spark", "status"], CommandContext())
+        self.assertFalse(decision.requires_approval)
+        self.assertEqual(decision.action_class, "none")
+
+    def test_approval_classifier_flags_destructive_delete(self) -> None:
+        decision = approval_required_for_command(["rm", "-rf", "/tmp/spark-test"], CommandContext())
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.action_class, "destructive_filesystem")
+        self.assertEqual(decision.risk, "critical")
+        self.assertEqual(decision.target_display, "/tmp/spark-test")
+
+    def test_approval_classifier_flags_git_history_mutation(self) -> None:
+        decision = approval_required_for_command(["git", "push", "--force-with-lease"], CommandContext())
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.action_class, "git_history_mutation")
+
+    def test_approval_classifier_flags_secret_reveal(self) -> None:
+        decision = approval_required_for_command(["spark", "secrets", "get", "telegram.bot_token", "--reveal"], CommandContext())
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.action_class, "credential_mutation")
+        self.assertNotIn("1234567890:", decision.command_digest)
+
+    def test_approval_classifier_flags_hosted_deploy(self) -> None:
+        decision = approval_required_for_command(["railway", "up", "--detach"], CommandContext(hosted=True))
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.action_class, "external_publish")
+        self.assertEqual(decision.confirmation_phrase, "approve hosted deploy")
+
+    def test_approval_classify_cli_outputs_json(self) -> None:
+        args = build_parser().parse_args(["approval", "classify", "--json", "--", "rm", "-rf", "/tmp/spark-test"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(args.func(args), 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["mode"], "report_only")
+        self.assertEqual(payload["decision"]["action_class"], "destructive_filesystem")
+        self.assertTrue(payload["decision"]["requires_approval"])
+
     def test_validate_init_module_name_rejects_bad_names(self) -> None:
         validate_init_module_name("my-module")
         validate_init_module_name("m1")
