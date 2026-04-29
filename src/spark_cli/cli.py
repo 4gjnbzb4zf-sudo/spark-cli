@@ -25,7 +25,7 @@ import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from xml.sax.saxutils import escape as xml_escape
 
 import tomllib
@@ -7084,12 +7084,25 @@ def hosted_allowed_host_errors(allowed_hosts: list[str]) -> list[str]:
     blocked = {"*", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"}
     for host in allowed_hosts:
         normalized = host.strip().lower()
+        host_without_port = normalized
+        if normalized.startswith("[") and "]" in normalized:
+            host_without_port = normalized[1 : normalized.index("]")]
+        elif normalized.count(":") == 1:
+            host_without_port = normalized.split(":", 1)[0]
         if normalized in blocked:
             errors.append(f"SPARK_ALLOWED_HOSTS contains unsafe host {host!r}.")
         if "*" in normalized:
             errors.append(f"SPARK_ALLOWED_HOSTS must not contain wildcards ({host!r}).")
         if "://" in normalized or "/" in normalized:
             errors.append(f"SPARK_ALLOWED_HOSTS must contain hostnames only, not URLs ({host!r}).")
+        if ":" in normalized and not normalized.startswith("["):
+            errors.append(f"SPARK_ALLOWED_HOSTS must not include ports ({host!r}).")
+        try:
+            address = ipaddress.ip_address(host_without_port)
+        except ValueError:
+            address = None
+        if address and (address.is_private or address.is_loopback or address.is_link_local or address.is_multicast):
+            errors.append(f"SPARK_ALLOWED_HOSTS must not contain private or local network addresses ({host!r}).")
     return errors
 
 
@@ -7143,6 +7156,75 @@ def hosted_headless_provider_errors(env: dict[str, str] | None = None) -> list[s
             errors.append(f"{role} uses Anthropic Claude but ANTHROPIC_API_KEY is not configured for hosted mode.")
 
     return errors
+
+
+def hosted_local_provider_endpoint_errors(env: dict[str, str] | None = None) -> list[str]:
+    source = env if env is not None else os.environ
+    role_providers = hosted_llm_role_providers(source)
+    errors: list[str] = []
+    local_provider_urls = {
+        "lmstudio": source.get("LMSTUDIO_BASE_URL") or source.get("SPARK_LMSTUDIO_BASE_URL") or "",
+        "ollama": source.get("OLLAMA_URL") or source.get("SPARK_OLLAMA_URL") or "",
+    }
+    for role, provider in role_providers.items():
+        if provider not in local_provider_urls:
+            continue
+        url = local_provider_urls[provider]
+        if not url:
+            continue
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            errors.append(
+                f"{role} uses {provider} at {url}; hosted Docker/Railway should use host.docker.internal or a reachable private provider URL."
+            )
+    return errors
+
+
+def proc_status_fields(status_path: Path = Path("/proc/self/status")) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    try:
+        text = status_path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError):
+        return fields
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def linux_no_new_privileges_enabled(status_path: Path = Path("/proc/self/status")) -> bool | None:
+    fields = proc_status_fields(status_path)
+    if "NoNewPrivs" not in fields:
+        return None
+    return fields["NoNewPrivs"].split()[0] == "1"
+
+
+def linux_effective_capabilities_dropped(status_path: Path = Path("/proc/self/status")) -> bool | None:
+    fields = proc_status_fields(status_path)
+    value = fields.get("CapEff")
+    if value is None:
+        return None
+    try:
+        return int(value.split()[0], 16) == 0
+    except ValueError:
+        return None
+
+
+def linux_root_filesystem_read_only(mountinfo_path: Path = Path("/proc/self/mountinfo")) -> bool | None:
+    if os.name == "nt":
+        return None
+    try:
+        mountinfo = mountinfo_path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError):
+        return None
+    for line in mountinfo.splitlines():
+        parts = line.split()
+        if len(parts) >= 6 and decode_mountinfo_path(parts[4]) == "/":
+            options = set(parts[5].split(","))
+            return "ro" in options
+    return None
 
 
 def hosted_spawner_base_url() -> str:
@@ -7234,6 +7316,7 @@ def hosted_deep_mission_smoke(timeout_seconds: int = 90) -> dict[str, Any]:
 def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
     role_providers = hosted_llm_role_providers()
     provider_errors = hosted_headless_provider_errors()
+    local_provider_endpoint_errors = hosted_local_provider_endpoint_errors()
     allowed_hosts = [host.strip() for host in (os.environ.get("SPARK_ALLOWED_HOSTS") or "").split(",") if host.strip()]
     allowed_host_errors = hosted_allowed_host_errors(allowed_hosts)
     ui_key = os.environ.get("SPARK_UI_API_KEY") or ""
@@ -7260,6 +7343,11 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
     )
     spark_home_value = os.environ.get("SPARK_HOME", str(SPARK_HOME))
     spark_home = Path(spark_home_value).expanduser().resolve()
+    no_new_privileges = linux_no_new_privileges_enabled()
+    capabilities_dropped = linux_effective_capabilities_dropped()
+    root_read_only = linux_root_filesystem_read_only()
+    hosted_runtime = bool(os.environ.get("SPARK_LIVE_CONTAINER") or os.environ.get("RAILWAY_ENVIRONMENT"))
+    strict_pins_required = hosted_runtime or public_bind
 
     checks = [
         {
@@ -7279,6 +7367,45 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
                 else "Docker socket is visible inside the container; this is effectively host-root access."
             ),
             "repair": "Remove any /var/run/docker.sock mount before running hosted Spark.",
+        },
+        {
+            "name": "container_no_new_privileges",
+            "ok": no_new_privileges is not False,
+            "required": False,
+            "detail": (
+                "Linux no-new-privileges is enabled."
+                if no_new_privileges is True
+                else "Linux no-new-privileges is disabled; this weakens container escape resistance."
+                if no_new_privileges is False
+                else "This platform does not expose Linux NoNewPrivs."
+            ),
+            "repair": "Run hosted Spark with `--security-opt no-new-privileges` or the equivalent platform policy.",
+        },
+        {
+            "name": "container_capabilities",
+            "ok": capabilities_dropped is not False,
+            "required": False,
+            "detail": (
+                "Linux effective capabilities are dropped."
+                if capabilities_dropped is True
+                else "Linux effective capabilities are still present; drop all capabilities where the host allows it."
+                if capabilities_dropped is False
+                else "This platform does not expose Linux capability status."
+            ),
+            "repair": "Run hosted Spark with `--cap-drop ALL` where supported.",
+        },
+        {
+            "name": "container_read_only_root",
+            "ok": root_read_only is not False,
+            "required": False,
+            "detail": (
+                "Container root filesystem is read-only."
+                if root_read_only is True
+                else "Container root filesystem is writable; prefer a read-only root filesystem plus writable Spark state volume."
+                if root_read_only is False
+                else "This platform does not expose root filesystem mount mode."
+            ),
+            "repair": "Use Docker `--read-only` plus tmpfs for /tmp and a dedicated writable Spark state volume where supported.",
         },
         {
             "name": "no_sensitive_mounts",
@@ -7343,15 +7470,28 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
         },
         {
             "name": "headless_provider",
-            "ok": not provider_errors,
+            "ok": not provider_errors and not local_provider_endpoint_errors,
             "required": True,
             "detail": (
                 "Hosted LLM roles are API/local-network compatible: "
                 + ", ".join(f"{role}={provider or 'not set'}" for role, provider in role_providers.items())
-                if not provider_errors
-                else "; ".join(provider_errors)
+                if not provider_errors and not local_provider_endpoint_errors
+                else "; ".join(provider_errors + local_provider_endpoint_errors)
             ),
             "repair": "Use zai, kimi, openrouter, huggingface, minimax, openai API key, anthropic API key, LM Studio, or Ollama for hosted Spark.",
+        },
+        {
+            "name": "strict_runtime_pins",
+            "ok": (not strict_pins_required) or runtime_guard_is_strict(),
+            "required": True,
+            "detail": (
+                "Strict runtime pins are enforced for hosted/public Spark."
+                if runtime_guard_is_strict()
+                else "Strict runtime pins are not required for this local-only context."
+                if not strict_pins_required
+                else "Hosted/public Spark should block dirty or off-pin runtime modules."
+            ),
+            "repair": "Set SPARK_STRICT_RUNTIME_PINS=1 for hosted Docker/Railway deployments.",
         },
         {
             "name": "hosted_secret_file_permissions",

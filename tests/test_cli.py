@@ -230,6 +230,10 @@ from spark_cli.cli import (
     telegram_profile_secret_id,
     hosted_cloud_credential_env_errors,
     hosted_sensitive_mount_errors,
+    hosted_local_provider_endpoint_errors,
+    linux_effective_capabilities_dropped,
+    linux_no_new_privileges_enabled,
+    linux_root_filesystem_read_only,
     mountinfo_mountpoints,
 )
 from spark_cli.security.approval import CommandContext, approval_required_for_command
@@ -6309,6 +6313,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                 "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
@@ -6332,6 +6337,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                 "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
@@ -6377,6 +6383,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_MISSION_LLM_PROVIDER": "codex",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
@@ -6399,6 +6406,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "anthropic",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                 "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
@@ -6419,6 +6427,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "anthropic",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "ANTHROPIC_API_KEY": "anthropic-key",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
@@ -6440,6 +6449,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                 "SPARK_BRIDGE_API_KEY": "changeme",
@@ -6462,6 +6472,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "*",
                 "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
@@ -6477,6 +6488,79 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(checks["allowed_hosts"]["ok"])
         self.assertIn("wildcards", checks["allowed_hosts"]["detail"])
 
+    def test_collect_hosted_security_payload_flags_private_allowed_hosts(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "10.0.0.5",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["allowed_hosts"]["ok"])
+        self.assertIn("private or local network", checks["allowed_hosts"]["detail"])
+
+    def test_collect_hosted_security_payload_requires_strict_pins_for_public_bind(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["strict_runtime_pins"]["ok"])
+        self.assertIn("block dirty or off-pin", checks["strict_runtime_pins"]["detail"])
+
+    def test_collect_hosted_security_payload_flags_localhost_lmstudio_inside_docker(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SPARK_HOME": "/data/spark",
+                "SPARK_LLM_PROVIDER": "lmstudio",
+                "LMSTUDIO_BASE_URL": "http://localhost:1234/v1",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
+                "SPARK_SPAWNER_HOST": "0.0.0.0",
+                "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
+                "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
+                "SPARK_UI_API_KEY": "ui-key-" + "u" * 32,
+            },
+            clear=True,
+        ), patch("spark_cli.cli.current_uid", return_value=1000), \
+            patch("spark_cli.cli.docker_socket_present", return_value=False), \
+            patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean", "findings": []}):
+            payload = collect_hosted_security_payload()
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["headless_provider"]["ok"])
+        self.assertIn("host.docker.internal", checks["headless_provider"]["detail"])
+
+    def test_hosted_local_provider_endpoint_errors_allow_host_docker_internal(self) -> None:
+        errors = hosted_local_provider_endpoint_errors({
+            "SPARK_LLM_PROVIDER": "ollama",
+            "OLLAMA_URL": "http://host.docker.internal:11434",
+        })
+        self.assertEqual(errors, [])
+
     def test_collect_hosted_security_payload_flags_loose_secret_file_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             secret_file = Path(temp_dir) / "secrets.local.json"
@@ -6486,6 +6570,7 @@ class SparkCliTests(unittest.TestCase):
                 {
                     "SPARK_HOME": "/data/spark",
                     "SPARK_LLM_PROVIDER": "zai",
+                    "SPARK_STRICT_RUNTIME_PINS": "1",
                     "SPARK_SPAWNER_HOST": "0.0.0.0",
                     "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                     "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
@@ -6528,6 +6613,7 @@ class SparkCliTests(unittest.TestCase):
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                 "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,
@@ -6552,12 +6638,29 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("AWS_ACCESS_KEY_ID", errors[0])
         self.assertNotIn("SPARK_UI_API_KEY", errors[0])
 
+    def test_linux_container_hardening_parsers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir) / "status"
+            status_path.write_text("Name:\tspark\nNoNewPrivs:\t1\nCapEff:\t0000000000000000\n", encoding="utf-8")
+            self.assertTrue(linux_no_new_privileges_enabled(status_path))
+            self.assertTrue(linux_effective_capabilities_dropped(status_path))
+
+            status_path.write_text("Name:\tspark\nNoNewPrivs:\t0\nCapEff:\t0000000000000002\n", encoding="utf-8")
+            self.assertFalse(linux_no_new_privileges_enabled(status_path))
+            self.assertFalse(linux_effective_capabilities_dropped(status_path))
+
+            mountinfo_path = Path(temp_dir) / "mountinfo"
+            mountinfo_path.write_text("36 29 0:32 / / ro,relatime - overlay overlay rw\n", encoding="utf-8")
+            with patch("spark_cli.cli.os.name", "posix"):
+                self.assertTrue(linux_root_filesystem_read_only(mountinfo_path))
+
     def test_collect_hosted_security_payload_deep_appends_mission_smoke(self) -> None:
         with patch.dict(
             os.environ,
             {
                 "SPARK_HOME": "/data/spark",
                 "SPARK_LLM_PROVIDER": "zai",
+                "SPARK_STRICT_RUNTIME_PINS": "1",
                 "SPARK_SPAWNER_HOST": "0.0.0.0",
                 "SPARK_ALLOWED_HOSTS": "spark-live.example.test",
                 "SPARK_BRIDGE_API_KEY": "bridge-key-" + "b" * 32,

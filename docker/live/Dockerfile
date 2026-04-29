@@ -35,10 +35,14 @@ ENV HOME=/home/spark \
     PYTHONDONTWRITEBYTECODE=1 \
     SPARK_HOME=/data/spark \
     SPARK_LIVE_CONTAINER=1 \
+    SPARK_STRICT_RUNTIME_PINS=1 \
     SPARK_SPAWNER_HOST=0.0.0.0 \
     SPARK_SPAWNER_PORT=5173
 
 EXPOSE 5173
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD spark live status >/dev/null || exit 1
 
 USER root
 ENTRYPOINT ["spark-live-entrypoint"]
