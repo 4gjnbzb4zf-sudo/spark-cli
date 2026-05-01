@@ -3358,7 +3358,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Get your Telegram bot ready", output)
         self.assertIn("Run setup", output)
         self.assertIn("Run: spark setup", output)
-        self.assertIn("Choose one Spark brain", output)
+        self.assertIn("Choose one provider for Agent and Mission", output)
         self.assertIn("@clipboard", output)
         self.assertIn("Turn Spark on", output)
         self.assertIn("spark live start", output)
@@ -3382,7 +3382,7 @@ class SparkCliTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("Advanced setup", output)
         self.assertIn("Provider control", output)
-        self.assertIn("agent: Conversation, Spark runtime reasoning, memory, and recall.", output)
+        self.assertIn("agent: Telegram chat, runtime reasoning, memory synthesis, and recall.", output)
         self.assertIn("spark setup --llm-provider openai", output)
         self.assertIn("--agent-llm-provider zai", output)
         self.assertIn("OpenAI Codex", output)
@@ -5560,7 +5560,7 @@ class SparkCliTests(unittest.TestCase):
             mission_llm_provider = None
 
         args = Args()
-        with patch("builtins.input", side_effect=["zai"]), \
+        with patch("builtins.input", side_effect=["zai", ""]), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
             values = run_llm_provider_wizard(args, {})
@@ -5601,13 +5601,14 @@ class SparkCliTests(unittest.TestCase):
     def test_run_llm_provider_wizard_keeps_one_provider_for_all_roles(self) -> None:
         class Args:
             llm_provider = None
+            agent_llm_provider = None
             chat_llm_provider = None
             builder_llm_provider = None
             memory_llm_provider = None
             mission_llm_provider = None
 
         args = Args()
-        answers = ["zai"]
+        answers = ["zai", ""]
         with patch("builtins.input", side_effect=answers), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
@@ -5619,16 +5620,60 @@ class SparkCliTests(unittest.TestCase):
         self.assertIsNone(args.mission_llm_provider)
         self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
 
-    def test_run_llm_provider_wizard_defaults_to_codex_when_signed_in(self) -> None:
+    def test_run_llm_provider_wizard_can_split_mission_provider_during_setup(self) -> None:
         class Args:
             llm_provider = None
+            agent_llm_provider = None
             chat_llm_provider = None
             builder_llm_provider = None
             memory_llm_provider = None
             mission_llm_provider = None
 
         args = Args()
-        with patch("builtins.input", side_effect=[""]), \
+        with patch("builtins.input", side_effect=["zai", "2", "codex"]), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
+             patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
+            values = run_llm_provider_wizard(args, {})
+
+        self.assertEqual(args.llm_provider, "zai")
+        self.assertEqual(args.mission_llm_provider, "codex")
+        self.assertEqual(resolve_llm_roles(args, values), {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "codex"})
+        self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
+
+    def test_run_llm_provider_wizard_can_choose_agent_and_mission_separately(self) -> None:
+        class Args:
+            llm_provider = None
+            agent_llm_provider = None
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        with patch("builtins.input", side_effect=["zai", "3", "anthropic", "codex"]), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
+             patch("spark_cli.cli.detect_claude_code", return_value={"present": True, "path": "claude"}), \
+             patch("spark_cli.cli.getpass.getpass") as getpass_mock:
+            values = run_llm_provider_wizard(args, {})
+
+        self.assertEqual(args.llm_provider, "zai")
+        self.assertEqual(args.agent_llm_provider, "anthropic")
+        self.assertEqual(args.mission_llm_provider, "codex")
+        self.assertEqual(resolve_llm_roles(args, values), {"chat": "anthropic", "builder": "anthropic", "memory": "anthropic", "mission": "codex"})
+        self.assertEqual(values, {})
+        getpass_mock.assert_not_called()
+
+    def test_run_llm_provider_wizard_defaults_to_codex_when_signed_in(self) -> None:
+        class Args:
+            llm_provider = None
+            agent_llm_provider = None
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        with patch("builtins.input", side_effect=["", ""]), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
              patch("sys.stdout", new_callable=StringIO) as stdout, \
              patch("spark_cli.cli.getpass.getpass") as getpass_mock:
@@ -5637,17 +5682,18 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(values, {})
         getpass_mock.assert_not_called()
         output = stdout.getvalue()
-        self.assertIn("Choose your Spark brain", output)
-        self.assertIn("chat, Builder, memory, retrieval, and Spawner missions", output)
+        self.assertIn("Choose the LLM Spark will use", output)
+        self.assertIn("Agent = Telegram chat, runtime reasoning, memory, and recall.", output)
+        self.assertIn("Mission = Spawner/Mission Control builds, research, coding, and longer tracked work.", output)
         self.assertIn("recommended OpenAI Codex path", output)
         self.assertIn("MiniMax", output)
         self.assertIn("OpenAI Codex CLI detected", output)
-        self.assertIn("--mission-llm-provider", output)
+        self.assertIn("Same provider for Agent and Mission", output)
         self.assertNotIn("Role setup", output)
 
     def test_provider_recommendations_cover_paid_api_and_local_paths(self) -> None:
         payload = provider_recommendations_payload()
-        self.assertIn("Choose one Spark brain first", payload["default_rule"])
+        self.assertIn("Choose one default provider for Agent and Mission", payload["default_rule"])
         self.assertIn("codex", payload["paths"]["already_have_subscription"])
         self.assertIn("kimi", payload["paths"]["already_have_api_key"])
         self.assertIn("openai", payload["paths"]["already_have_api_key"])
@@ -6583,7 +6629,7 @@ class SparkCliTests(unittest.TestCase):
         )
         self.assertIn("spark-telegram-bot is missing dependencies: spark-intelligence-builder.", hints)
         self.assertIn(
-            "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers.",
+            "No LLM provider is configured. Run `spark setup` to choose an Agent provider and Mission provider.",
             hints,
         )
 
@@ -6669,7 +6715,7 @@ class SparkCliTests(unittest.TestCase):
             },
         )
         self.assertIn(
-            "No LLM provider is configured. Run `spark setup` to choose chat, builder, memory, and mission providers.",
+            "No LLM provider is configured. Run `spark setup` to choose an Agent provider and Mission provider.",
             hints,
         )
         self.assertIn(
