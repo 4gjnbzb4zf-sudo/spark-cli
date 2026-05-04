@@ -715,7 +715,11 @@ checkout_cli() {
   else
     log "Cloning spark-cli from $SPARK_CLI_SOURCE"
     rm -rf "$target"
-    git clone --depth=1 "$SPARK_CLI_SOURCE" "$target"
+    if printf '%s' "$SPARK_CLI_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+      git clone "$SPARK_CLI_SOURCE" "$target"
+    else
+      git clone --depth=1 "$SPARK_CLI_SOURCE" "$target"
+    fi
   fi
   checkout_cli_ref "$target"
 }

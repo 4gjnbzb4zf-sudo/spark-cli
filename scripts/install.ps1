@@ -518,7 +518,11 @@ function Checkout-Cli {
             Remove-Item -LiteralPath $target -Recurse -Force
         }
         Write-SparkLog "Cloning spark-cli from $Source"
-        git clone --depth=1 $Source $target
+        if ($Ref -match "^[0-9a-f]{40}$") {
+            git clone $Source $target
+        } else {
+            git clone --depth=1 $Source $target
+        }
     }
     Checkout-CliRef -Target $target
     return $target
