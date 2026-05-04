@@ -2,14 +2,14 @@
   "modules": {
     "spark-researcher": {
       "source": "https://github.com/vibeforge1111/spark-researcher",
-      "commit": "5025bf69d5eec3fb0f51223cbe6b09d19c3d88b2",
+      "commit": "0bab9a573a43c645731011f598c8cdc223fd28b4",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Research, advisory, memory packet, and domain-chip authoring runtime for Spark",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/spark-researcher",
-        "commit": "5025bf69d5eec3fb0f51223cbe6b09d19c3d88b2"
+        "commit": "0bab9a573a43c645731011f598c8cdc223fd28b4"
       }
     },
     "spark-character": {
@@ -26,50 +26,50 @@
     },
     "spark-telegram-bot": {
       "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-      "commit": "6a4a00a3341d992c17e25ef5b4fc4d29a919e155",
+      "commit": "9859bd277b2467f15cd6c0027b9055dbd2708b56",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Telegram ingress gateway for the Spark starter stack",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-        "commit": "6a4a00a3341d992c17e25ef5b4fc4d29a919e155"
+        "commit": "9859bd277b2467f15cd6c0027b9055dbd2708b56"
       }
     },
     "spark-intelligence-builder": {
       "source": "https://github.com/vibeforge1111/spark-intelligence-builder",
-      "commit": "e80cd62914ddd79904f0187efd0838491c37aed9",
+      "commit": "fc60275c253bc410a9c348cd78e8b6c9b66d9da1",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Spark runtime core for identity, memory, and routing",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/spark-intelligence-builder",
-        "commit": "e80cd62914ddd79904f0187efd0838491c37aed9"
+        "commit": "fc60275c253bc410a9c348cd78e8b6c9b66d9da1"
       }
     },
     "domain-chip-memory": {
       "source": "https://github.com/vibeforge1111/domain-chip-memory",
-      "commit": "aa86b3b0d180675b98b2bfd36abecbd9c0e84f8e",
+      "commit": "8de77eac137dbc91db66f664df2f094a6b5f6411",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Default memory substrate, benchmark pack, and Telegram memory-check chip",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/domain-chip-memory",
-        "commit": "aa86b3b0d180675b98b2bfd36abecbd9c0e84f8e"
+        "commit": "8de77eac137dbc91db66f664df2f094a6b5f6411"
       }
     },
     "spawner-ui": {
       "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
-      "commit": "9a4f9422f83813a0f784d59fe0aba64444a36ae6",
+      "commit": "55dd9b8f453b1251b8cc0b51c077f2d65dee2926",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Execution plane and local dashboard for the Spark starter stack",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
-        "commit": "9a4f9422f83813a0f784d59fe0aba64444a36ae6"
+        "commit": "55dd9b8f453b1251b8cc0b51c077f2d65dee2926"
       }
     }
   },
