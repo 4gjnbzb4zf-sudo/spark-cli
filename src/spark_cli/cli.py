@@ -3901,6 +3901,8 @@ def install_module_record(
     installed = load_json(REGISTRY_PATH, {})
     existing = dict(installed.get(module.name, {}))
     registry_metadata = load_registry_definition().get("modules", {}).get(module.name, {})
+    registry_commit = str(registry_metadata.get("commit") or "").strip().lower()
+    registry_source = str(registry_metadata.get("source") or "").strip()
     now = timestamp_now()
     installed_via = dict(existing.get("installed_via", {}))
     if not installed_via:
@@ -3915,10 +3917,11 @@ def install_module_record(
     if bundle_name and bundle_name not in bundle_provenance:
         bundle_provenance.append(bundle_name)
 
-    installed[module.name] = {
+    record = {
         **existing,
         "path": str(module.path),
         "source": str(module.path),
+        "registry_source": registry_source,
         "version": module.version,
         "kind": module.kind,
         "plane": module.plane,
@@ -3929,6 +3932,9 @@ def install_module_record(
         "installed_via": installed_via,
         "bundle_provenance": bundle_provenance,
     }
+    if registry_commit:
+        record["registry_commit"] = registry_commit
+    installed[module.name] = record
     outcome_key = "last_install" if operation == "install" else "last_update"
     installed[module.name][outcome_key] = {
         "status": "ok",
@@ -3946,6 +3952,8 @@ def describe_installed_record(module: Module, record: dict[str, Any]) -> dict[st
     installed = dict(record)
     installed.setdefault("path", str(module.path))
     installed.setdefault("source", str(module.path))
+    installed.setdefault("registry_source", str(registry_metadata.get("source") or ""))
+    installed.setdefault("registry_commit", str(registry_metadata.get("commit") or "").strip().lower())
     installed.setdefault("version", module.version)
     installed.setdefault("kind", module.kind)
     installed.setdefault("plane", module.plane)
@@ -6351,6 +6359,8 @@ def local_control_surface_errors() -> list[str]:
 def telegram_polling_conflict_errors() -> list[str]:
     errors: list[str] = []
     setup_state = load_json(CONFIG_PATH, {})
+    if telegram_ingress_is_external(setup_state if isinstance(setup_state, dict) else {}):
+        return []
     profiles = configured_telegram_profiles() or [DEFAULT_TELEGRAM_PROFILE]
     token_profiles: dict[str, list[str]] = {}
 
@@ -6448,6 +6458,16 @@ def git_current_head(path: Path) -> str | None:
     return value if validate_commit_pin(value) else None
 
 
+def installed_record_registry_commit(record: dict[str, Any]) -> str | None:
+    value = str(record.get("registry_commit") or record.get("commit") or "").strip().lower()
+    if not value:
+        return None
+    try:
+        return validate_commit_pin(value)
+    except SystemExit:
+        return None
+
+
 def module_supply_chain_errors() -> list[str]:
     installed = load_json(REGISTRY_PATH, {})
     registry_modules = load_registry_definition().get("modules", {})
@@ -6494,7 +6514,13 @@ def module_supply_chain_errors() -> list[str]:
             if git_short_status(path):
                 errors.append(f"Installed module `{name}` has local git changes.")
         else:
-            errors.append(f"Installed module `{name}` is not a git checkout, so commit provenance cannot be verified.")
+            recorded = installed_record_registry_commit(record)
+            if recorded is None:
+                errors.append(
+                    f"Installed module `{name}` is not a git checkout and has no recorded registry commit provenance."
+                )
+            elif recorded != pinned:
+                errors.append(f"Installed module `{name}` records {recorded[:12]}, not pinned {pinned[:12]}.")
     return errors
 
 

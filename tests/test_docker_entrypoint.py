@@ -36,3 +36,23 @@ def test_live_docker_entrypoint_disables_os_autostart() -> None:
     script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
     assert "--no-autostart" in script
     assert "--no-start-now" in script
+
+
+def test_live_vps_compose_uses_container_hardening() -> None:
+    compose = (Path(__file__).resolve().parents[1] / "docker" / "live" / "docker-compose.vps.yml").read_text(encoding="utf-8")
+    assert 'user: "1001:1001"' in compose
+    assert "read_only: true" in compose
+    assert "cap_drop:" in compose
+    assert "- ALL" in compose
+    assert "no-new-privileges:true" in compose
+    assert "/tmp:rw,noexec,nosuid" in compose
+    assert "./spark-data:/data/spark" in compose
+
+
+def test_live_vps_env_example_has_placeholders_only() -> None:
+    env = (Path(__file__).resolve().parents[1] / "docker" / "live" / "spark-live.env.example").read_text(encoding="utf-8")
+    assert "SPARK_UI_API_KEY=replace-with-a-random-value" in env
+    assert "SPARK_BRIDGE_API_KEY=replace-with-a-different-random-value" in env
+    assert "TELEGRAM_BOT_TOKEN=" in env
+    assert "ZAI_API_KEY=" in env
+    assert "SPARK_LIVE_TELEGRAM_MODE=external" in env

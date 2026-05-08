@@ -13,3 +13,5 @@ logs/
 config/
 modules/
 secrets.local.json
+docker/live/spark-data/
+docker/live/spark-live.env

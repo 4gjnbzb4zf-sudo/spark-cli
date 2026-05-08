@@ -1,0 +1,23 @@
+services:
+  spark-live:
+    build:
+      context: ../..
+      dockerfile: docker/live/Dockerfile
+    user: "1001:1001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    volumes:
+      - ./spark-data:/data/spark
+    ports:
+      - "5173:5173"
+    env_file:
+      - ./spark-live.env
+    environment:
+      SPARK_SPAWNER_HOST: "0.0.0.0"
+      SPARK_SPAWNER_PORT: "5173"
+    restart: unless-stopped
