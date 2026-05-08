@@ -112,6 +112,7 @@ from spark_cli.cli import (
     endpoint_security_errors,
     module_supply_chain_errors,
     security_provider_detail,
+    telegram_polling_conflict_errors,
     validate_init_module_name,
     describe_install_risk,
     enforce_module_trust_scan,
@@ -989,6 +990,67 @@ class SparkCliTests(unittest.TestCase):
                 errors = module_supply_chain_errors()
         self.assertTrue(any("not pinned" in error for error in errors))
         self.assertTrue(any("local git changes" in error for error in errors))
+
+    def test_module_supply_chain_accepts_recorded_commit_for_hosted_non_git_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spark_home = Path(tmp_dir) / ".spark"
+            module_path = spark_home / "modules" / "spawner-ui" / "source"
+            module_path.mkdir(parents=True)
+            pinned = "a" * 40
+            installed = {"spawner-ui": {"path": str(module_path), "registry_commit": pinned}}
+            registry = {
+                "modules": {
+                    "spawner-ui": {
+                        "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
+                        "commit": pinned,
+                        "blessed": True,
+                    }
+                }
+            }
+            with patch("spark_cli.cli.SPARK_HOME", spark_home), \
+                 patch("spark_cli.cli.load_json", return_value=installed), \
+                 patch("spark_cli.cli.load_registry_definition", return_value=registry):
+                errors = module_supply_chain_errors()
+        self.assertEqual(errors, [])
+
+    def test_module_supply_chain_flags_hosted_non_git_install_without_recorded_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spark_home = Path(tmp_dir) / ".spark"
+            module_path = spark_home / "modules" / "spawner-ui" / "source"
+            module_path.mkdir(parents=True)
+            installed = {"spawner-ui": {"path": str(module_path)}}
+            registry = {
+                "modules": {
+                    "spawner-ui": {
+                        "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
+                        "commit": "a" * 40,
+                        "blessed": True,
+                    }
+                }
+            }
+            with patch("spark_cli.cli.SPARK_HOME", spark_home), \
+                 patch("spark_cli.cli.load_json", return_value=installed), \
+                 patch("spark_cli.cli.load_registry_definition", return_value=registry):
+                errors = module_supply_chain_errors()
+        self.assertTrue(any("no recorded registry commit provenance" in error for error in errors))
+
+    def test_telegram_polling_conflict_errors_ignore_stale_logs_for_external_ingress(self) -> None:
+        setup_state = {"telegram_ingress_mode": "external"}
+        with patch("spark_cli.cli.load_json", return_value=setup_state), \
+             patch("spark_cli.cli.configured_telegram_profiles", return_value=["default"]), \
+             patch("spark_cli.cli.tail_log_lines", return_value=["409: Conflict: terminated by other getUpdates request"]), \
+             patch("spark_cli.cli.fetch_secret", return_value="123456789:token"):
+            errors = telegram_polling_conflict_errors()
+        self.assertEqual(errors, [])
+
+    def test_telegram_polling_conflict_errors_still_flag_monolith_conflicts(self) -> None:
+        setup_state = {"telegram_ingress_mode": "monolith"}
+        with patch("spark_cli.cli.load_json", return_value=setup_state), \
+             patch("spark_cli.cli.configured_telegram_profiles", return_value=["default"]), \
+             patch("spark_cli.cli.tail_log_lines", return_value=["409: Conflict: terminated by other getUpdates request"]), \
+             patch("spark_cli.cli.fetch_secret", return_value=None):
+            errors = telegram_polling_conflict_errors()
+        self.assertTrue(any("getUpdates conflict" in error for error in errors))
 
     def test_runtime_supply_chain_warnings_only_check_startable_managed_modules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

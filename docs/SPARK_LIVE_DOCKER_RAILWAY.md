@@ -97,13 +97,31 @@ If both Spark Live and `spark-telegram-bot` receive the same bot token, Telegram
 will terminate one poller with `409 Conflict: terminated by other getUpdates
 request`.
 
-Minimum:
+Minimum for monolith Spark Live:
 
 ```text
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ADMIN_IDS=123456789
 SPARK_LLM_PROVIDER=zai
 ZAI_API_KEY=...
+```
+
+Minimum for split Railway/VPS Spark Live:
+
+```text
+SPARK_LIVE_TELEGRAM_MODE=external
+SPARK_LLM_PROVIDER=zai
+ZAI_API_KEY=...
+```
+
+Minimum for the separate split `spark-telegram-bot` service:
+
+```text
+BOT_TOKEN=...
+ADMIN_TELEGRAM_IDS=123456789
+TELEGRAM_GATEWAY_MODE=polling
+TELEGRAM_RELAY_SECRET=<same-random-relay-secret-as-Spark-Live>
+TELEGRAM_RELAY_URL=http://spark-telegram-bot.railway.internal:8788/spawner-events
 ```
 
 Supported `SPARK_LLM_PROVIDER` values for headless hosts:
@@ -188,7 +206,7 @@ Start command: leave empty; the image entrypoint starts Spark Live
 Volume mount: /data/spark
 ```
 
-Set secrets in Railway Variables, never in source control:
+Set Spark Live secrets in Railway Variables, never in source control:
 
 ```text
 RAILWAY_DOCKERFILE_PATH=docker/live/Dockerfile
@@ -196,13 +214,14 @@ RAILWAY_RUN_UID=0
 SPARK_ALLOWED_HOSTS=<your-railway-domain>.up.railway.app
 SPARK_UI_API_KEY=<different-random-secret-at-least-24-chars>
 SPARK_BRIDGE_API_KEY=<different-random-secret-at-least-24-chars>
-TELEGRAM_BOT_TOKEN
-TELEGRAM_ADMIN_IDS
 SPARK_LLM_PROVIDER
 ZAI_API_KEY / OPENAI_API_KEY / etc.
 CODEX_HOME=/data/spark/codex
 SPARK_SPAWNER_PORT=${PORT}
 ```
+
+Only add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_IDS` to Spark Live for a
+monolith deployment where Spark Live owns Telegram polling.
 
 For split Railway deploys, omit `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_IDS`
 from this Spark Live service. The separate `spark-telegram-bot` service should
@@ -218,8 +237,10 @@ domain without disabling host-header protection for every possible host. Use
 hostnames only: no `https://`, no paths, no wildcards, no loopback values.
 `SPARK_UI_API_KEY` protects the hosted Spawner UI. Open the Railway URL and Spark
 will redirect browser users to `/spark-live/login`; paste the UI key there to set
-an httpOnly browser cookie. The `?uiKey=<SPARK_UI_API_KEY>` route remains
-available for automation/bootstrap, but it should not be the main human path.
+an httpOnly browser cookie. The `?uiKey=<SPARK_UI_API_KEY>` route is a legacy
+automation/bootstrap escape hatch only. Do not share it with humans or paste it
+into chat; query-string secrets can leak through browser history and request
+logs.
 `SPARK_BRIDGE_API_KEY` protects mission-start/control APIs.
 
 After deploy:
