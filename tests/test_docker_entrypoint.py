@@ -1,10 +1,35 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+
+ENTRYPOINT = Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh"
+
+
+def bash_available() -> bool:
+    try:
+        result = subprocess.run(
+            ["bash", "-lc", "set -euo pipefail; printf ok"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout == "ok"
+
+
+def read_entrypoint() -> str:
+    return ENTRYPOINT.read_text(encoding="utf-8")
 
 
 def test_live_docker_entrypoint_fails_closed_for_public_spawner() -> None:
-    script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
+    script = read_entrypoint()
     assert "umask 077" in script
     assert "is_public_spawner_bind" in script
     assert "SPARK_ALLOWED_HOSTS is required when Spawner binds publicly" in script
@@ -15,7 +40,7 @@ def test_live_docker_entrypoint_fails_closed_for_public_spawner() -> None:
 
 
 def test_live_docker_entrypoint_supports_external_telegram_ingress() -> None:
-    script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
+    script = read_entrypoint()
     assert 'SPARK_LIVE_TELEGRAM_MODE:-monolith' in script
     assert 'SPARK_LIVE_TELEGRAM_MODE must be' in script
     assert 'setup_args+=(--external-telegram-ingress)' in script
@@ -23,7 +48,7 @@ def test_live_docker_entrypoint_supports_external_telegram_ingress() -> None:
 
 
 def test_live_docker_entrypoint_rejects_local_telegram_secrets_in_external_mode() -> None:
-    script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
+    script = read_entrypoint()
     assert "looks_like_telegram_bot_token" in script
     assert "looks_like_telegram_admin_ids" in script
     assert "has_telegram_bot_token_env" in script
@@ -38,8 +63,48 @@ def test_live_docker_entrypoint_rejects_local_telegram_secrets_in_external_mode(
     assert "unset TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_IDS BOT_TOKEN ADMIN_TELEGRAM_IDS" in script
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("TELEGRAM_BOT_TOKEN", "123456789:real-looking-token", "TELEGRAM_BOT_TOKEN looks like a real bot token"),
+        ("BOT_TOKEN", "123456789:real-looking-token", "BOT_TOKEN looks like a real bot token"),
+        ("TELEGRAM_ADMIN_IDS", "123456789", "TELEGRAM_ADMIN_IDS looks like real admin IDs"),
+        ("ADMIN_TELEGRAM_IDS", "123456789", "ADMIN_TELEGRAM_IDS looks like real admin IDs"),
+    ],
+)
+@pytest.mark.skipif(not bash_available(), reason="bash is required for executable entrypoint regression tests")
+@pytest.mark.skipif(sys.platform == "win32", reason="entrypoint executable regression tests run under Linux bash in CI")
+def test_live_docker_entrypoint_external_mode_rejects_telegram_env_before_setup(
+    name: str, value: str, message: str
+) -> None:
+    env = os.environ.copy()
+    for telegram_name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ADMIN_IDS", "BOT_TOKEN", "ADMIN_TELEGRAM_IDS"):
+        env.pop(telegram_name, None)
+    env.update(
+        {
+            "SPARK_LLM_PROVIDER": "zai",
+            "SPARK_LIVE_PRIVILEGE_DROPPED": "1",
+            "SPARK_LIVE_TELEGRAM_MODE": "external",
+            name: value,
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-s"],
+        capture_output=True,
+        env=env,
+        input=read_entrypoint().replace("\r", ""),
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert message in result.stdout
+    assert "Configuring Spark" not in result.stdout
+
+
 def test_live_docker_entrypoint_disables_os_autostart() -> None:
-    script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
+    script = read_entrypoint()
     assert "--no-autostart" in script
     assert "--no-start-now" in script
 
