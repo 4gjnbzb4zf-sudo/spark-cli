@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 import subprocess
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,34 @@ SAFE_JSONL_COUNT_KEYS = (
     "decision",
     "route",
     "surface",
+)
+
+SAFE_TELEGRAM_FINAL_ANSWER_FIELDS = (
+    "ts",
+    "event",
+    "outcome",
+    "builder_bridge_mode",
+    "builder_routing_decision",
+    "fallback_route",
+    "latest_intent_preserved",
+    "builder_reply_length",
+    "suppression_reason",
+)
+
+SAFE_TELEGRAM_OUTBOUND_FIELDS = (
+    "ts",
+    "event",
+    "text_length",
+)
+
+SAFE_SPAWNER_PRD_TRACE_FIELDS = (
+    "ts",
+    "event",
+    "requestId",
+    "missionId",
+    "provider",
+    "buildMode",
+    "timeoutMs",
 )
 
 SAFE_MEMORY_STATUS_KEYS = {
@@ -470,6 +498,187 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
     out["parse_errors"] = parse_errors
     out["top_keys"] = dict(key_counts.most_common(30))
     out["safe_value_counts"] = {key: dict(counter.most_common(30)) for key, counter in value_counts.items() if counter}
+    return out
+
+
+def inspect_safe_jsonl_samples(
+    path: Path,
+    *,
+    source: str,
+    safe_fields: tuple[str, ...],
+    identifier_fields: dict[str, str] | None = None,
+    limit: int = 40,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source": source,
+        "path": str(path),
+        "exists": path.exists(),
+        "limit": limit,
+        "redaction": "bounded samples over allowlisted primitive metadata only; raw messages and text previews omitted",
+    }
+    if not path.exists():
+        return out
+
+    identifier_fields = identifier_fields or {}
+    line_count = parsed_count = parse_errors = 0
+    key_counts: Counter[str] = Counter()
+    samples: deque[dict[str, Any]] = deque(maxlen=max(0, min(int(limit), 100)))
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                line_count += 1
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                parsed_count += 1
+                if not isinstance(payload, dict):
+                    continue
+                for key in payload:
+                    key_counts[str(key)] += 1
+                sample: dict[str, Any] = {}
+                for field in safe_fields:
+                    if field in payload:
+                        sample[field] = safe_jsonl_sample_value(
+                            field,
+                            payload.get(field),
+                            identifier_fields=identifier_fields,
+                        )
+                if sample:
+                    samples.append(sample)
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    out["line_count"] = line_count
+    out["parsed_count"] = parsed_count
+    out["parse_errors"] = parse_errors
+    out["top_keys"] = dict(key_counts.most_common(30))
+    out["samples"] = list(samples)
+    out["sample_count"] = len(samples)
+    return out
+
+
+def safe_jsonl_sample_value(field: str, value: Any, *, identifier_fields: dict[str, str]) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        identifier_column = identifier_fields.get(field)
+        if identifier_column:
+            return safe_builder_event_value(identifier_column, value)
+        return safe_short_string(value, limit=160)
+    if isinstance(value, list):
+        return f"[list:{len(value)}]"
+    if isinstance(value, dict):
+        return f"[object:{len(value)}]"
+    return safe_short_string(str(value), limit=80)
+
+
+def inspect_telegram_final_answer_gate(path: Path) -> dict[str, Any]:
+    out = inspect_safe_jsonl_samples(
+        path,
+        source="telegram_final_answer_gate",
+        safe_fields=SAFE_TELEGRAM_FINAL_ANSWER_FIELDS,
+    )
+    top_keys = as_dict(out.get("top_keys"))
+    request_id_present = "request_id" in top_keys or "requestId" in top_keys
+    trace_ref_present = "trace_ref" in top_keys or "traceRef" in top_keys
+    out["trace_join"] = {
+        "request_id_field_present": request_id_present,
+        "trace_ref_field_present": trace_ref_present,
+        "status": "join_key_present" if request_id_present or trace_ref_present else "missing_join_key",
+        "next_action": "Emit request_id or trace_ref from Telegram final-answer gate checks.",
+    }
+    return out
+
+
+def inspect_telegram_outbound_audit(path: Path) -> dict[str, Any]:
+    return inspect_safe_jsonl_samples(
+        path,
+        source="telegram_outbound_audit",
+        safe_fields=SAFE_TELEGRAM_OUTBOUND_FIELDS,
+    )
+
+
+def inspect_spawner_prd_auto_trace(path: Path, *, builder_home: Path) -> dict[str, Any]:
+    out = inspect_safe_jsonl_samples(
+        path,
+        source="spawner_prd_auto_trace",
+        safe_fields=SAFE_SPAWNER_PRD_TRACE_FIELDS,
+        identifier_fields={"requestId": "request_id", "missionId": "request_id"},
+    )
+    request_ids: set[str] = set()
+    mission_ids: set[str] = set()
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    request_id = payload.get("requestId")
+                    mission_id = payload.get("missionId")
+                    if isinstance(request_id, str) and request_id.strip():
+                        request_ids.add(request_id.strip())
+                    if isinstance(mission_id, str) and mission_id.strip():
+                        mission_ids.add(mission_id.strip())
+        except Exception as exc:
+            out["join_error"] = f"{type(exc).__name__}: {exc}"
+    out["join_keys"] = {
+        "request_id_count": len(request_ids),
+        "mission_id_count": len(mission_ids),
+    }
+    out["builder_request_overlap"] = inspect_builder_request_id_overlap(builder_home, request_ids)
+    return out
+
+
+def inspect_builder_request_id_overlap(builder_home: Path, request_ids: set[str]) -> dict[str, Any]:
+    db_path = builder_home / "state.db"
+    out: dict[str, Any] = {
+        "source": "builder_events",
+        "exists": db_path.exists(),
+        "checked_request_id_count": len(request_ids),
+        "redaction": "overlap counts only; request id values omitted",
+    }
+    if not request_ids or not db_path.exists():
+        out["matched_builder_request_id_count"] = 0
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            tables = [row[0] for row in conn.execute("select name from sqlite_master where type='table'")]
+            if "builder_events" not in tables:
+                out["table_exists"] = False
+                out["matched_builder_request_id_count"] = 0
+                return out
+            columns = [row[1] for row in conn.execute("pragma table_info(builder_events)")]
+            if "request_id" not in columns:
+                out["request_id_column_exists"] = False
+                out["matched_builder_request_id_count"] = 0
+                return out
+            candidates = sorted(request_ids)[:500]
+            placeholders = ",".join("?" for _ in candidates)
+            matched = conn.execute(
+                f"""
+                select count(distinct request_id)
+                from builder_events
+                where request_id in ({placeholders})
+                """,
+                candidates,
+            ).fetchone()[0]
+            out["matched_builder_request_id_count"] = int(matched or 0)
+        finally:
+            conn.close()
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
     return out
 
 
@@ -1347,15 +1556,24 @@ def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
         "builder_trace_groups": inspect_builder_trace_groups(builder_home),
         "builder_trace_health": inspect_builder_trace_health(builder_home),
         "telegram_final_answer_gate": count_safe_jsonl(telegram_state / "final-answer-gate-audit.jsonl"),
+        "telegram_final_answer_gate_samples": inspect_telegram_final_answer_gate(
+            telegram_state / "final-answer-gate-audit.jsonl"
+        ),
         "telegram_outbound_audit": count_safe_jsonl(telegram_state / "node-outbound-audit.jsonl"),
+        "telegram_outbound_audit_samples": inspect_telegram_outbound_audit(
+            telegram_state / "node-outbound-audit.jsonl"
+        ),
         "spawner_mission_control_shape": inspect_json_shape(spawner_state / "mission-control.json"),
         "spawner_provider_results_shape": inspect_json_shape(spawner_state / "mission-provider-results.json"),
         "spawner_prd_auto_trace": count_safe_jsonl(spawner_state / "prd-auto-trace.jsonl"),
+        "spawner_prd_auto_trace_samples": inspect_spawner_prd_auto_trace(
+            spawner_state / "prd-auto-trace.jsonl",
+            builder_home=builder_home,
+        ),
         "next_required_bridges": [
-            "Map Builder parent/child event ordering and missing-parent diagnostics into one trace river.",
             "Map Spawner mission ids to Builder mission_changed_state events.",
             "Map Telegram final-answer gate checks to final_answer_checked black-box events.",
-            "Promote trace health flags into Builder AOC and cockpit repair queues.",
+            "Emit Telegram request_id or trace_ref join keys from final-answer gate checks.",
         ],
     }
 

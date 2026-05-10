@@ -16,6 +16,8 @@ from spark_cli.system_map import (
     inspect_builder_event_samples,
     inspect_builder_trace_health,
     inspect_builder_trace_groups,
+    inspect_spawner_prd_auto_trace,
+    inspect_telegram_final_answer_gate,
     safe_builder_event_value,
     summarize_pids,
     summarize_setup,
@@ -70,6 +72,80 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertIn("summary", summary["top_keys"])
         self.assertNotIn("private text", encoded)
         self.assertNotIn("secret", encoded)
+
+    def test_cross_system_trace_samples_keep_join_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            builder_home = root / "spark-intelligence"
+            builder_home.mkdir()
+            conn = sqlite3.connect(builder_home / "state.db")
+            try:
+                conn.execute("create table builder_events(request_id text)")
+                conn.execute("insert into builder_events(request_id) values (?)", ("req-1",))
+                conn.commit()
+            finally:
+                conn.close()
+
+            final_gate = root / "final-answer-gate-audit.jsonl"
+            final_gate.write_text(
+                json.dumps(
+                    {
+                        "ts": "2026-05-10T13:00:00Z",
+                        "event": "final_answer_gate",
+                        "outcome": "delivered",
+                        "builder_bridge_mode": "builder",
+                        "builder_reply_preview": "private answer with token=secret",
+                        "chat_id": "telegram:123456789",
+                        "user_id": "telegram:987654321",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            spawner_trace = root / "prd-auto-trace.jsonl"
+            spawner_trace.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "ts": "2026-05-10T13:00:01Z",
+                                "event": "mission_started",
+                                "requestId": "req-1",
+                                "missionId": "mission-1",
+                                "provider": "codex",
+                                "stateDirectory": "C:/private/path",
+                                "projectName": "private project",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "ts": "2026-05-10T13:00:02Z",
+                                "event": "mission_waiting",
+                                "requestId": "req-2",
+                                "timeoutMs": 1000,
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            final_summary = inspect_telegram_final_answer_gate(final_gate)
+            spawner_summary = inspect_spawner_prd_auto_trace(spawner_trace, builder_home=builder_home)
+
+        encoded = json.dumps({"final": final_summary, "spawner": spawner_summary})
+        self.assertEqual(final_summary["sample_count"], 1)
+        self.assertEqual(final_summary["samples"][0]["outcome"], "delivered")
+        self.assertEqual(final_summary["trace_join"]["status"], "missing_join_key")
+        self.assertEqual(spawner_summary["join_keys"]["request_id_count"], 2)
+        self.assertEqual(spawner_summary["join_keys"]["mission_id_count"], 1)
+        self.assertEqual(spawner_summary["builder_request_overlap"]["matched_builder_request_id_count"], 1)
+        self.assertEqual(spawner_summary["samples"][0]["requestId"], "req-1")
+        self.assertNotIn("private answer", encoded)
+        self.assertNotIn("token=secret", encoded)
+        self.assertNotIn("telegram:123456789", encoded)
+        self.assertNotIn("C:/private/path", encoded)
+        self.assertNotIn("private project", encoded)
 
     def test_process_summary_omits_raw_command_args(self) -> None:
         summary = summarize_pids(
