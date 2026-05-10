@@ -7447,6 +7447,48 @@ def cmd_approval(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_access_payload(payload: dict[str, Any]) -> None:
+    recommended = payload.get("recommended") if isinstance(payload.get("recommended"), dict) else {}
+    print("Spark access setup")
+    print(f"Access level: {payload.get('access_level')}")
+    print(f"OS: {payload.get('os_family')}")
+    print(f"Workspace: {payload.get('workspace_path')}")
+    print(f"Recommended lane: {recommended.get('label') or recommended.get('id')}")
+    if recommended.get("user_message"):
+        print(str(recommended["user_message"]))
+    if recommended.get("os_hint"):
+        print(str(recommended["os_hint"]))
+    print("")
+    print("Available lanes:")
+    for lane in payload.get("lanes", []):
+        if not isinstance(lane, dict):
+            continue
+        marker = "*" if lane.get("recommended") else "-"
+        status = "ready" if lane.get("available") else str(lane.get("setup_mode") or "guided")
+        print(f"  {marker} {lane.get('label') or lane.get('id')}: {status}")
+    print("")
+    print(f"Next: {payload.get('next')}")
+
+
+def cmd_access(args: argparse.Namespace) -> int:
+    from .sandbox.access import access_lane_payload
+
+    requested_lane = str(getattr(args, "with_lane", "") or "")
+    goal = str(getattr(args, "goal", "") or "")
+    if requested_lane and requested_lane not in goal.lower():
+        goal = f"{goal} {requested_lane}".strip()
+    payload = access_lane_payload(
+        level=int(getattr(args, "level", 4) or 4),
+        goal=goal,
+        setup=getattr(args, "access_command", "") == "setup",
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+        return 0 if payload.get("ok") else 1
+    print_access_payload(payload)
+    return 0 if payload.get("ok") else 1
+
+
 def cmd_sandbox(args: argparse.Namespace) -> int:
     from .sandbox.capabilities import CapabilityManifest
     from .sandbox.modal import collect_modal_doctor_payload, collect_modal_smoke_payload
@@ -12813,6 +12855,20 @@ def build_parser() -> argparse.ArgumentParser:
     security_revoke_parser.add_argument("--include-logs", action="store_true", help="Include redacted logs in the support bundle")
     security_revoke_parser.add_argument("--json", action="store_true")
     security_revoke_parser.set_defaults(func=cmd_security)
+
+    access_parser = subparsers.add_parser("access", help="Prepare Spark's local access lanes without technical sandbox choices")
+    access_subparsers = access_parser.add_subparsers(dest="access_command", required=True)
+    access_status_parser = access_subparsers.add_parser("status", help="Show the current recommended access lane")
+    access_status_parser.add_argument("--level", type=int, choices=[4, 5], default=4)
+    access_status_parser.add_argument("--goal", default="", help="Optional task goal used to recommend Docker, SSH, Modal, or workspace")
+    access_status_parser.add_argument("--json", action="store_true")
+    access_status_parser.set_defaults(func=cmd_access)
+    access_setup_parser = access_subparsers.add_parser("setup", help="Create the safe Level 4 workspace and show optional lanes")
+    access_setup_parser.add_argument("--level", type=int, choices=[4, 5], default=4)
+    access_setup_parser.add_argument("--goal", default="", help="Optional task goal used to recommend Docker, SSH, Modal, or workspace")
+    access_setup_parser.add_argument("--with", dest="with_lane", choices=["docker", "ssh", "modal"], help="Prefer a guided optional lane after the workspace is ready")
+    access_setup_parser.add_argument("--json", action="store_true")
+    access_setup_parser.set_defaults(func=cmd_access)
 
     sandbox_parser = subparsers.add_parser("sandbox", help="Manage optional SSH and Modal sandbox checks")
     sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_backend", required=True)
