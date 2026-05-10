@@ -89,7 +89,7 @@ def persist_level5_guardrails(*, home: Path | None = None, env: dict[str, str] |
     spawner_env = read_env_file(paths["spawner"])
     telegram_env = read_env_file(paths["telegram"])
     spawner_env.update(LEVEL5_ENV)
-    telegram_env["SPARK_ALLOW_HIGH_AGENCY_WORKERS"] = "1"
+    telegram_env.update(LEVEL5_ENV)
     write_env_file(paths["spawner"], spawner_env)
     write_env_file(paths["telegram"], telegram_env)
     write_audit_event(
@@ -124,7 +124,7 @@ def disable_level5_guardrails(*, home: Path | None = None, env: dict[str, str] |
     paths = level5_env_paths(home=home, env=env)
     changed = {
         "spawner": _remove_env_keys(paths["spawner"], set(LEVEL5_ENV)),
-        "telegram": _remove_env_keys(paths["telegram"], {"SPARK_ALLOW_HIGH_AGENCY_WORKERS"}),
+        "telegram": _remove_env_keys(paths["telegram"], set(LEVEL5_ENV)),
     }
     write_audit_event(
         "access",
@@ -259,6 +259,14 @@ def access_guide_payload(payload: dict[str, Any]) -> dict[str, Any]:
     workspace_ready = bool(workspace_preflight.get("writable"))
     family = str(payload.get("os_family") or "unknown")
     level5 = payload.get("level5") if isinstance(payload.get("level5"), dict) else {}
+    level5_state = str(level5.get("activation_state") or "")
+    if not level5_state:
+        if level5.get("enabled"):
+            level5_state = "active"
+        elif level5.get("restart_required"):
+            level5_state = "restart_required"
+        else:
+            level5_state = "blocked"
     steps = [
         {
             "id": "safe_workspace",
@@ -291,20 +299,26 @@ def access_guide_payload(payload: dict[str, Any]) -> dict[str, Any]:
         },
     ]
     if level >= 5:
+        if level5_state == "active":
+            whole_computer_message = "Level 5 is active. Spark should still prefer the safe workspace unless a task really needs the whole computer."
+            whole_computer_action = "spark access status --level 5"
+        elif level5_state == "session_only":
+            whole_computer_message = "Level 5 is active only in this process. Run setup to persist it before relying on it after restart."
+            whole_computer_action = "spark access setup --level 5 --enable-high-agency"
+        elif level5_state == "restart_required":
+            whole_computer_message = "Level 5 is configured, but Spark must restart before Telegram and Spawner can see it."
+            whole_computer_action = "spark restart"
+        else:
+            whole_computer_message = "Level 5 can operate on the whole computer. Spark will not enable it silently."
+            whole_computer_action = "spark access setup --level 5 --enable-high-agency"
         steps.append(
             {
                 "id": "whole_computer",
                 "title": "Whole-computer mode",
-                "status": "active" if level5.get("enabled") else "restart_required" if level5.get("restart_required") else "explicit_opt_in_required",
+                "status": level5_state if level5_state != "blocked" else "explicit_opt_in_required",
                 "automatic": False,
-                "user_message": (
-                    "Level 5 is active. Spark should still prefer the safe workspace unless a task really needs the whole computer."
-                    if level5.get("enabled")
-                    else "Level 5 is configured, but Spark must restart before Telegram and Spawner can see it."
-                    if level5.get("restart_required")
-                    else "Level 5 can operate on the whole computer. Spark will not enable it silently."
-                ),
-                "spark_cli_action": "spark restart" if level5.get("restart_required") else "spark access setup --level 5 --enable-high-agency",
+                "user_message": whole_computer_message,
+                "spark_cli_action": whole_computer_action,
             }
         )
     return {
@@ -371,6 +385,24 @@ def access_lane_payload(
     )
     level5_enabled = level5_process_enabled and level5_external_paths and level5_full_sandbox
     level5_restart_required = level5_configured and not level5_enabled
+    if level5_enabled and level5_configured:
+        level5_activation_state = "active"
+    elif level5_enabled:
+        level5_activation_state = "session_only"
+    elif level5_restart_required:
+        level5_activation_state = "restart_required"
+    elif any((
+        level5_process_enabled,
+        level5_external_paths,
+        level5_full_sandbox,
+        enabled(generated_env.get("SPARK_ALLOW_HIGH_AGENCY_WORKERS")),
+        enabled(generated_env.get("SPARK_ALLOW_EXTERNAL_PROJECT_PATHS")),
+        generated_env.get("SPARK_CODEX_SANDBOX") == "danger-full-access",
+    )):
+        level5_activation_state = "partial"
+    else:
+        level5_activation_state = "blocked"
+    effective_access_level = 5 if level >= 5 and level5_enabled else min(level, DEFAULT_ACCESS_LEVEL)
 
     lanes = [
         {
@@ -439,10 +471,12 @@ def access_lane_payload(
 
     if level >= 5:
         operator_action = (
-            "spark restart"
-            if level5_restart_required
-            else "spark access setup --level 5"
-            if level5_enabled
+            "spark access status --level 5"
+            if level5_activation_state == "active"
+            else "spark access setup --level 5 --enable-high-agency"
+            if level5_activation_state == "session_only"
+            else "spark restart"
+            if level5_activation_state == "restart_required"
             else "spark access setup --level 5 --enable-high-agency"
         )
         lanes.insert(
@@ -454,10 +488,14 @@ def access_lane_payload(
                 "setup_mode": "automatic" if level5_enabled else "guided" if level5_restart_required else "blocked",
                 "spark_cli_action": operator_action,
                 "user_message": (
-                    "Whole-computer mode is enabled, but Spark should still prefer a sandbox."
-                    if level5_enabled
+                    "Whole-computer mode is enabled and persisted, but Spark should still prefer a sandbox."
+                    if level5_activation_state == "active"
+                    else "Whole-computer mode is active only for this process. Run setup to persist the guardrails."
+                    if level5_activation_state == "session_only"
                     else "Whole-computer mode is configured; restart Spark so Telegram and Spawner load the guardrails."
-                    if level5_restart_required
+                    if level5_activation_state == "restart_required"
+                    else "Whole-computer mode is partially configured. Rerun setup to repair the guardrails."
+                    if level5_activation_state == "partial"
                     else "Whole-computer mode is blocked until high-agency guardrails are explicitly enabled."
                 ),
             },
@@ -471,6 +509,10 @@ def access_lane_payload(
         recommended["recommended"] = True
     if level >= 5 and level5_restart_required:
         next_action = "spark restart"
+    elif level >= 5 and level5_activation_state == "session_only":
+        next_action = "spark access setup --level 5 --enable-high-agency"
+    elif level >= 5 and level5_activation_state == "active":
+        next_action = "spark access status --level 5"
     elif level >= 5 and not level5_enabled and not level5_restart_required:
         next_action = "spark access setup --level 5 --enable-high-agency"
     else:
@@ -484,6 +526,7 @@ def access_lane_payload(
     return {
         "ok": ok,
         "access_level": level,
+        "effective_access_level": effective_access_level,
         "os_family": family,
         "workspace_root": str(workspace_root),
         "workspace_path": str(workspace_path),
@@ -491,6 +534,7 @@ def access_lane_payload(
         "level5": {
             "enabled": level5_enabled,
             "configured": level5_configured,
+            "activation_state": level5_activation_state,
             "process_enabled": level5_process_enabled,
             "external_paths": level5_external_paths,
             "codex_sandbox": env_values.get("SPARK_CODEX_SANDBOX") or "workspace-write",
@@ -499,6 +543,14 @@ def access_lane_payload(
             "env_files": written_level5_env,
             "audit": sandbox_audit_ref("access", "level5") if written_level5_env else {},
             "disable_command": "spark access disable-level5",
+        },
+        "state_machine": {
+            "requested_access_level": level,
+            "effective_access_level": effective_access_level,
+            "activation_state": level5_activation_state if level >= 5 else "workspace",
+            "requires_restart": bool(level >= 5 and level5_restart_required),
+            "can_operate_whole_computer": bool(level >= 5 and level5_enabled),
+            "persistent": bool(level >= 5 and level5_enabled and level5_configured),
         },
         "setup_ran": setup,
         "recommended": recommended,
@@ -512,6 +564,7 @@ def access_lane_payload(
             "level5": {
                 "enabled": level5_enabled,
                 "restart_required": level5_restart_required,
+                "activation_state": level5_activation_state,
             },
         }),
     }

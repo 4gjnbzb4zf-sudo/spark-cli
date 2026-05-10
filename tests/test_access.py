@@ -38,15 +38,22 @@ DOCKER_READY = {
 
 
 class AccessSetupTests(unittest.TestCase):
-    def run_access(self, *argv: str, spark_home: Path) -> tuple[int, dict[str, object]]:
+    def run_access(
+        self,
+        *argv: str,
+        spark_home: Path,
+        env_overrides: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, object]]:
         args = build_parser().parse_args(["access", *argv, "--json"])
         stdout = StringIO()
-        with patch.dict(os.environ, {
+        env_values = {
             "SPARK_HOME": str(spark_home),
             "SPARK_ALLOW_HIGH_AGENCY_WORKERS": "",
             "SPARK_ALLOW_EXTERNAL_PROJECT_PATHS": "",
             "SPARK_CODEX_SANDBOX": "",
-        }, clear=False), \
+        }
+        env_values.update(env_overrides or {})
+        with patch.dict(os.environ, env_values, clear=False), \
              patch("spark_cli.sandbox.access.collect_docker_doctor_payload", return_value=DOCKER_NOT_READY), \
              patch("spark_cli.sandbox.access.modal_sdk_available", return_value=False), \
              redirect_stdout(stdout):
@@ -80,6 +87,21 @@ class AccessSetupTests(unittest.TestCase):
             self.assertIn("safe default", payload["guide"]["plain_default"])
             self.assertFalse(payload["guide"]["default"]["whole_computer_access"])
 
+    def test_access_guide_reports_os_specific_hints(self) -> None:
+        cases = [
+            ("darwin", "macos", "macOS default"),
+            ("win32", "windows", "Windows default"),
+            ("linux", "linux", "Linux default"),
+        ]
+        for platform, family, hint in cases:
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmpdir, \
+                 patch("spark_cli.sandbox.access.sys.platform", platform):
+                exit_code, payload = self.run_access("guide", spark_home=Path(tmpdir) / "spark-home")
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["os_family"], family)
+            self.assertIn(hint, payload["guide"]["os_note"])
+
     def test_access_status_keeps_level5_blocked_without_high_agency_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"SPARK_ALLOW_HIGH_AGENCY_WORKERS": ""}, clear=False):
             exit_code, payload = self.run_access("status", "--level", "5", spark_home=Path(tmpdir) / "spark-home")
@@ -108,12 +130,86 @@ class AccessSetupTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["level5"]["configured"])
         self.assertTrue(payload["level5"]["restart_required"])
+        self.assertEqual(payload["level5"]["activation_state"], "restart_required")
+        self.assertEqual(payload["effective_access_level"], 4)
+        self.assertFalse(payload["state_machine"]["can_operate_whole_computer"])
         self.assertEqual(payload["next"], "spark restart")
         self.assertIn("SPARK_ALLOW_HIGH_AGENCY_WORKERS=1", spawner_env)
         self.assertIn("SPARK_ALLOW_EXTERNAL_PROJECT_PATHS=1", spawner_env)
         self.assertIn("SPARK_CODEX_SANDBOX=danger-full-access", spawner_env)
         self.assertIn("SPARK_ALLOW_HIGH_AGENCY_WORKERS=1", telegram_env)
+        self.assertIn("SPARK_ALLOW_EXTERNAL_PROJECT_PATHS=1", telegram_env)
+        self.assertIn("SPARK_CODEX_SANDBOX=danger-full-access", telegram_env)
         self.assertTrue(audit_written)
+
+    def test_access_setup_level5_overwrites_stale_telegram_guardrails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spark_home = Path(tmpdir) / "spark-home"
+            module_env = spark_home / "config" / "modules"
+            module_env.mkdir(parents=True)
+            (module_env / "spark-telegram-bot.env").write_text(
+                "SPARK_ALLOW_HIGH_AGENCY_WORKERS=0\n"
+                "SPARK_ALLOW_EXTERNAL_PROJECT_PATHS=0\n"
+                "SPARK_CODEX_SANDBOX=workspace-write\n",
+                encoding="utf-8",
+            )
+
+            exit_code, payload = self.run_access("setup", "--level", "5", "--enable-high-agency", spark_home=spark_home)
+            telegram_env = (module_env / "spark-telegram-bot.env").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["level5"]["configured"])
+        self.assertEqual(payload["level5"]["activation_state"], "restart_required")
+        self.assertIn("SPARK_ALLOW_HIGH_AGENCY_WORKERS=1", telegram_env)
+        self.assertIn("SPARK_ALLOW_EXTERNAL_PROJECT_PATHS=1", telegram_env)
+        self.assertIn("SPARK_CODEX_SANDBOX=danger-full-access", telegram_env)
+
+    def test_access_status_level5_active_after_restart_env_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spark_home = Path(tmpdir) / "spark-home"
+            self.run_access("setup", "--level", "5", "--enable-high-agency", spark_home=spark_home)
+            exit_code, payload = self.run_access(
+                "status",
+                "--level",
+                "5",
+                spark_home=spark_home,
+                env_overrides={
+                    "SPARK_ALLOW_HIGH_AGENCY_WORKERS": "1",
+                    "SPARK_ALLOW_EXTERNAL_PROJECT_PATHS": "1",
+                    "SPARK_CODEX_SANDBOX": "danger-full-access",
+                },
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["level5"]["enabled"])
+        self.assertTrue(payload["level5"]["configured"])
+        self.assertFalse(payload["level5"]["restart_required"])
+        self.assertEqual(payload["level5"]["activation_state"], "active")
+        self.assertEqual(payload["effective_access_level"], 5)
+        self.assertTrue(payload["state_machine"]["can_operate_whole_computer"])
+        self.assertTrue(payload["state_machine"]["persistent"])
+        self.assertEqual(payload["recommended"]["id"], "level5_operator")
+
+    def test_access_status_level5_session_only_needs_persistent_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exit_code, payload = self.run_access(
+                "status",
+                "--level",
+                "5",
+                spark_home=Path(tmpdir) / "spark-home",
+                env_overrides={
+                    "SPARK_ALLOW_HIGH_AGENCY_WORKERS": "1",
+                    "SPARK_ALLOW_EXTERNAL_PROJECT_PATHS": "1",
+                    "SPARK_CODEX_SANDBOX": "danger-full-access",
+                },
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["level5"]["enabled"])
+        self.assertFalse(payload["level5"]["configured"])
+        self.assertEqual(payload["level5"]["activation_state"], "session_only")
+        self.assertEqual(payload["next"], "spark access setup --level 5 --enable-high-agency")
+        self.assertFalse(payload["state_machine"]["persistent"])
 
     def test_access_disable_level5_removes_guardrail_env_and_requires_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,6 +226,8 @@ class AccessSetupTests(unittest.TestCase):
         self.assertNotIn("SPARK_ALLOW_EXTERNAL_PROJECT_PATHS", spawner_env)
         self.assertNotIn("SPARK_CODEX_SANDBOX", spawner_env)
         self.assertNotIn("SPARK_ALLOW_HIGH_AGENCY_WORKERS", telegram_env)
+        self.assertNotIn("SPARK_ALLOW_EXTERNAL_PROJECT_PATHS", telegram_env)
+        self.assertNotIn("SPARK_CODEX_SANDBOX", telegram_env)
 
     def test_access_setup_can_recommend_docker_when_requested_and_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
