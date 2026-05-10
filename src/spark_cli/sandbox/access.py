@@ -20,6 +20,11 @@ LEVEL5_ENV = {
 }
 
 
+DEFAULT_ACCESS_LEVEL = 4
+DEFAULT_SANDBOX_LANE = "spark_workspace"
+DEFAULT_CODEX_SANDBOX = "workspace-write"
+
+
 def access_os_family(platform: str | None = None) -> str:
     value = platform or sys.platform
     if value == "darwin":
@@ -230,6 +235,98 @@ def goal_needs(goal: str, lane: str) -> bool:
     return False
 
 
+def safe_workspace_setup_state(*, home: Path | None = None, env: dict[str, str] | None = None) -> dict[str, Any]:
+    workspace_root = spark_workspace_root(home=home, env=env)
+    workspace_path = ensure_level4_workspace(home=home, env=env)
+    preflight = probe_workspace_writable(workspace_path)
+    return {
+        "default_level": DEFAULT_ACCESS_LEVEL,
+        "default_lane": DEFAULT_SANDBOX_LANE,
+        "codex_sandbox": DEFAULT_CODEX_SANDBOX,
+        "boundary_kind": "workspace_write",
+        "workspace_root": str(workspace_root),
+        "workspace_path": str(workspace_path),
+        "workspace_preflight": preflight,
+        "whole_computer_access": False,
+        "user_message": "Spark is set up to work inside one safe working folder by default.",
+        "security_note": "This is a practical file boundary, not a hardened container security boundary. Use Docker or Modal when a task needs stronger isolation.",
+    }
+
+
+def access_guide_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    level = int(payload.get("access_level") or DEFAULT_ACCESS_LEVEL)
+    workspace_preflight = payload.get("workspace_preflight") if isinstance(payload.get("workspace_preflight"), dict) else {}
+    workspace_ready = bool(workspace_preflight.get("writable"))
+    family = str(payload.get("os_family") or "unknown")
+    level5 = payload.get("level5") if isinstance(payload.get("level5"), dict) else {}
+    steps = [
+        {
+            "id": "safe_workspace",
+            "title": "Safe workspace",
+            "status": "ready" if workspace_ready else "needs_setup",
+            "automatic": True,
+            "user_message": (
+                f"Spark can already work inside the safe workspace at {payload.get('workspace_path')}."
+                if workspace_ready
+                else "Spark will create one safe working folder before agents touch local files."
+            ),
+            "spark_cli_action": "spark access setup",
+        },
+        {
+            "id": "mission_control",
+            "title": "Mission Control builds",
+            "status": "ready" if workspace_ready else "waiting_for_workspace",
+            "automatic": True,
+            "user_message": "Builds run with workspace-write access by default, not whole-computer access.",
+            "spark_cli_action": "spark verify --onboarding",
+        },
+        {
+            "id": "stronger_sandbox",
+            "title": "Stronger sandbox, only when needed",
+            "status": "optional",
+            "automatic": False,
+            "default_choice": "docker",
+            "user_message": "If a task needs more isolation, Spark should try Docker first, then Modal for cloud/GPU jobs, then SSH for trusted user-owned machines.",
+            "spark_cli_action": "spark sandbox docker doctor",
+        },
+    ]
+    if level >= 5:
+        steps.append(
+            {
+                "id": "whole_computer",
+                "title": "Whole-computer mode",
+                "status": "active" if level5.get("enabled") else "restart_required" if level5.get("restart_required") else "explicit_opt_in_required",
+                "automatic": False,
+                "user_message": (
+                    "Level 5 is active. Spark should still prefer the safe workspace unless a task really needs the whole computer."
+                    if level5.get("enabled")
+                    else "Level 5 is configured, but Spark must restart before Telegram and Spawner can see it."
+                    if level5.get("restart_required")
+                    else "Level 5 can operate on the whole computer. Spark will not enable it silently."
+                ),
+                "spark_cli_action": "spark restart" if level5.get("restart_required") else "spark access setup --level 5 --enable-high-agency",
+            }
+        )
+    return {
+        "summary": (
+            "Safe workspace is ready."
+            if workspace_ready
+            else "Safe workspace is not ready yet. Spark can create it automatically."
+        ),
+        "plain_default": "Use the Spark Workspace Sandbox first. It is the safe default on macOS, Windows, Linux, and WSL.",
+        "security_note": "Workspace mode keeps normal Spark work inside one working folder. It is not a hardened container; use Docker or Modal for stronger isolation.",
+        "os_note": workspace_os_hint(family),
+        "default": {
+            "access_level": DEFAULT_ACCESS_LEVEL,
+            "lane": DEFAULT_SANDBOX_LANE,
+            "codex_sandbox": DEFAULT_CODEX_SANDBOX,
+            "whole_computer_access": False,
+        },
+        "stronger_sandbox_order": ["docker", "modal", "ssh"],
+        "steps": steps,
+    }
+
+
 def access_lane_payload(
     *,
     level: int = 4,
@@ -407,6 +504,16 @@ def access_lane_payload(
         "recommended": recommended,
         "lanes": lanes,
         "next": next_action,
+        "guide": access_guide_payload({
+            "access_level": level,
+            "os_family": family,
+            "workspace_path": str(workspace_path),
+            "workspace_preflight": workspace_preflight,
+            "level5": {
+                "enabled": level5_enabled,
+                "restart_required": level5_restart_required,
+            },
+        }),
     }
 
 

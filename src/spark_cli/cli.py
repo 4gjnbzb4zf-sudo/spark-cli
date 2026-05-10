@@ -3370,6 +3370,7 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     builder_home = spark_builder_home()
     _, llm_env = build_llm_env(args, secret_values)
     relay_secret = secret_values.get("telegram.relay_secret") or py_secrets.token_urlsafe(32)
+    workspace_root = str(SPARK_HOME / "workspaces")
 
     gateway_env = {
         "BOT_TOKEN": secret_values.get("telegram.bot_token", ""),
@@ -3385,6 +3386,9 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "TELEGRAM_RELAY_SECRET": relay_secret,
         "SPARK_ONBOARDING_SESSION": str(getattr(args, "onboarding_session", "") or ""),
         "SPARK_ONBOARDING_EVENT_PATH": str(TELEGRAM_FIRST_MESSAGE_EVENTS_PATH),
+        "SPARK_WORKSPACE_ROOT": workspace_root,
+        "SPARK_ACCESS_LEVEL_DEFAULT": "4",
+        "SPARK_ACCESS_DEFAULT_LANE": "spark_workspace",
     }
     if character is not None:
         gateway_env["SPARK_CHARACTER_ROOT"] = str(character.path)
@@ -3393,8 +3397,13 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     webhook_urls = telegram_profile_webhook_urls() or [default_telegram_webhook_url(args.spawner_ui_url)]
     spawner_env = {
         "MISSION_CONTROL_WEBHOOK_URLS": ",".join(webhook_urls),
-        "SPARK_WORKSPACE_ROOT": str(SPARK_HOME / "workspaces"),
+        "SPARK_WORKSPACE_ROOT": workspace_root,
+        "SPAWNER_WORKSPACE_ROOT": workspace_root,
         "SPAWNER_STATE_DIR": str(STATE_DIR / "spawner-ui"),
+        "SPARK_ACCESS_LEVEL_DEFAULT": "4",
+        "SPARK_ACCESS_DEFAULT_LANE": "spark_workspace",
+        "SPARK_WORKSPACE_BOUNDARY_KIND": "workspace_write",
+        "SPARK_CODEX_SANDBOX": "workspace-write",
     }
     for key in HOSTED_SPAWNER_PARENT_ENV_KEYS:
         value = os.environ.get(key)
@@ -3413,6 +3422,9 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
 
     builder_env = {
         "SPARK_INTELLIGENCE_HOME": str(builder_home),
+        "SPARK_WORKSPACE_ROOT": workspace_root,
+        "SPARK_ACCESS_LEVEL_DEFAULT": "4",
+        "SPARK_ACCESS_DEFAULT_LANE": "spark_workspace",
         **llm_metadata_env,
     }
     if researcher is not None:
@@ -4806,9 +4818,24 @@ def print_setup_next_steps(
         print("Spark is configured, but not started yet.")
     print("")
     print(f"Telegram: {telegram_label}")
-    print("Recommended for builders: choose Level 4 when prompted so Mission Control can inspect and build in local workspaces.")
-    print("Choose a lower level only for chat-only or public-research installs.")
     print(f"Autostart: {'enabled' if autostart_enabled else 'disabled'}")
+    access_state = setup_state.get("access") if isinstance(setup_state, dict) else None
+    if isinstance(access_state, dict):
+        preflight = access_state.get("workspace_preflight") if isinstance(access_state.get("workspace_preflight"), dict) else {}
+        ready_label = "ready" if preflight.get("writable") else "needs attention"
+        print("")
+        print(f"Access: Level 4 safe workspace is {ready_label} at {access_state.get('workspace_path')}.")
+        print("Recommended for builders: choose Level 4 when prompted so Mission Control can work in this workspace.")
+        print("Choose a lower level only for chat-only or public-research installs.")
+        print("Spark uses workspace-write by default; whole-computer access is off.")
+        print("Docker: optional stronger local isolation for riskier or reproducible work.")
+        print("Modal: optional disposable cloud compute; Spark does not pass secrets or project files by default.")
+        print("SSH: optional user-owned remote machine access, not the default sandbox.")
+        print("Level 5 whole-computer mode stays off unless explicitly enabled with:")
+        print("  spark access setup --level 5 --enable-high-agency")
+    else:
+        print("Recommended for builders: choose Level 4 when prompted so Mission Control can inspect and build in local workspaces.")
+        print("Choose a lower level only for chat-only or public-research installs.")
     print("")
     print("Open Telegram and send:")
     print(f"  /start {session}")
@@ -4905,6 +4932,8 @@ def collect_setup_configuration(
     interactive: bool,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Collect secrets and LLM choices, then build the persisted setup state."""
+    from .sandbox.access import safe_workspace_setup_state
+
     existing_setup = load_json(CONFIG_PATH, {})
     secret_values = collect_secret_values(args, bundle, interactive=interactive)
     secret_values = ensure_generated_setup_secrets(secret_values, bundle)
@@ -4936,6 +4965,7 @@ def collect_setup_configuration(
         "secret_keys": sorted(preserved_secret_keys | set(secret_values.keys())),
         "llm": llm_setup_state(llm_provider, llm_env),
         "builder_home": str(spark_builder_home()),
+        "access": safe_workspace_setup_state(home=SPARK_HOME),
         "onboarding_session": (
             str(preserved_onboarding_session).strip()
             if isinstance(preserved_onboarding_session, str) and preserved_onboarding_session.strip()
@@ -7461,6 +7491,14 @@ def print_access_payload(payload: dict[str, Any]) -> None:
     workspace_preflight = payload.get("workspace_preflight") if isinstance(payload.get("workspace_preflight"), dict) else {}
     if workspace_preflight:
         print(f"Workspace preflight: {'writable' if workspace_preflight.get('writable') else 'not writable'}")
+    guide = payload.get("guide") if isinstance(payload.get("guide"), dict) else {}
+    if guide:
+        print("")
+        print(str(guide.get("summary") or "Guided access path"))
+        print(str(guide.get("plain_default") or "Use the Spark workspace first."))
+        if guide.get("security_note"):
+            print(str(guide["security_note"]))
+        print("Stronger sandbox order: Docker -> Modal -> SSH")
     level5 = payload.get("level5") if isinstance(payload.get("level5"), dict) else {}
     if int(payload.get("access_level") or 0) >= 5:
         if level5.get("enabled"):
@@ -12411,6 +12449,15 @@ def onboarding_guide_payload() -> dict[str, Any]:
             ],
             "llm_auth_note": "The easiest path is `spark setup` and the guided picker. You can use one provider for Agent and Mission, or split them during setup. `--agent-llm-provider` sets Telegram chat, runtime reasoning, memory, and recall together. `--mission-llm-provider` sets Spawner/Mission Control build work separately. OpenAI Codex or ChatGPT users should choose OpenAI Codex after `codex login`. Anthropic Claude users should choose Anthropic Claude after installing Claude Code and checking `claude -p \"hello\"`. Z.AI GLM, Kimi/Moonshot, OpenRouter, MiniMax, Hugging Face, and OpenAI API use API keys. Ollama and LM Studio are local.",
         },
+        "access": {
+            "default": "Spark setup automatically creates a Level 4 safe workspace and points Mission Control at it.",
+            "plain_language": "Level 4 means Spark can work in its Spark workspace. It does not mean whole-computer access.",
+            "stronger_local": "Docker is the first stronger local sandbox when it is installed and running.",
+            "cloud": "Modal is for disposable cloud/GPU work and starts with no Spark secrets or project files by default.",
+            "remote": "SSH is for a machine the user owns and controls; it is not a sandbox by itself.",
+            "level5": "Level 5 whole-computer mode is explicit opt-in with spark access setup --level 5 --enable-high-agency.",
+            "commands": ["spark access guide", "spark access setup", "spark sandbox docker doctor"],
+        },
         "quick_start": [
             {"title": "Get your Telegram bot ready", "steps": [
                 "Open Telegram and message @BotFather.",
@@ -12459,7 +12506,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             {"level": "1", "about": "Chat, memory, recall, and diagnostics. No Spawner builds."},
             {"level": "2", "about": "Requested remote missions. Spark only starts Spawner after you clearly ask."},
             {"level": "3", "about": "Public links, docs, and GitHub research, plus requested missions. Does not inspect local folders."},
-            {"level": "4", "about": "Recommended for builders. Local projects, files on this computer, Mission Control builds, debugging, repo inspection, and deeper missions. Destructive actions still need explicit approval."},
+            {"level": "4", "about": "Recommended for builders. Spark works inside its safe workspace by default, with Mission Control builds, debugging, repo inspection, and deeper missions. Destructive actions still need explicit approval."},
         ],
         "telegram_commands": [
             { "command": "/start", "use": "Show the basic command surface." },
@@ -12512,7 +12559,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark verify [--onboarding|--deep|--installers|--sandboxes]", "use": "Verify launch-critical wiring, onboarding, deeper runtime checks, installer integrity, or optional SSH/Modal sandbox readiness." },
             { "command": "spark smoke first-run [--quick|--json]", "use": "Check first-run readiness and print the exact Telegram smoke script for Mission Control." },
             { "command": "spark fix <target>", "use": "Run targeted repair guidance for telegram, secrets, spawner, providers, memory, live, update, or autostart." },
-            { "command": "spark access status|setup|disable-level5", "use": "Prepare and verify Spark workspace access, optional sandbox lanes, and explicit Level 5 guardrail state." },
+            { "command": "spark access status|guide|setup|disable-level5", "use": "Prepare, explain, and verify Spark workspace access, optional sandbox lanes, and explicit Level 5 guardrail state." },
             { "command": "spark providers list|status|test|recommend", "use": "Inspect, test, and choose LLM provider wiring." },
             { "command": "spark recommend llms|providers", "use": "Recommend Spark setup choices." },
             { "command": "spark security audit", "use": "Audit local security posture." },
@@ -12558,6 +12605,13 @@ def cmd_guide(args: argparse.Namespace) -> int:
     print(payload["goal"])
     print("Works on: " + ", ".join(payload["operating_systems"]))
     print("")
+    access = payload.get("access") if isinstance(payload.get("access"), dict) else {}
+    if access:
+        print("Safe access")
+        print(f"   {access['default']}")
+        print(f"   {access['plain_language']}")
+        print(f"   {access['stronger_local']}")
+        print("")
     for index, section in enumerate(payload["quick_start"], start=1):
         print(f"{index}. {section['title']}")
         for step in section["steps"]:
@@ -12590,6 +12644,8 @@ def cmd_guide(args: argparse.Namespace) -> int:
         print("What Spark can do")
         for item in payload["access_levels"]:
             print(f"   - {item['about']}")
+        if access:
+            print(f"   - {access['level5']}")
         print("   Change it in Telegram with /access <1|2|3|4>.")
         print("")
         print("How the modules work together")
@@ -12903,6 +12959,11 @@ def build_parser() -> argparse.ArgumentParser:
     access_status_parser.add_argument("--goal", default="", help="Optional task goal used to recommend Docker, SSH, Modal, or workspace")
     access_status_parser.add_argument("--json", action="store_true")
     access_status_parser.set_defaults(func=cmd_access)
+    access_guide_parser = access_subparsers.add_parser("guide", help="Explain Spark's safe access path in plain language")
+    access_guide_parser.add_argument("--level", type=int, choices=[4, 5], default=4)
+    access_guide_parser.add_argument("--goal", default="", help="Optional task goal used to recommend Docker, SSH, Modal, or workspace")
+    access_guide_parser.add_argument("--json", action="store_true")
+    access_guide_parser.set_defaults(func=cmd_access)
     access_setup_parser = access_subparsers.add_parser("setup", help="Create the safe Level 4 workspace and show optional lanes")
     access_setup_parser.add_argument("--level", type=int, choices=[4, 5], default=4)
     access_setup_parser.add_argument("--goal", default="", help="Optional task goal used to recommend Docker, SSH, Modal, or workspace")

@@ -63,6 +63,21 @@ class AccessSetupTests(unittest.TestCase):
             self.assertEqual(payload["recommended"]["setup_mode"], "automatic")
             self.assertTrue(payload["workspace_preflight"]["writable"])
             self.assertTrue(Path(str(payload["workspace_path"])).exists())
+            self.assertEqual(payload["guide"]["default"]["access_level"], 4)
+            self.assertFalse(payload["guide"]["default"]["whole_computer_access"])
+            self.assertEqual(payload["guide"]["stronger_sandbox_order"], ["docker", "modal", "ssh"])
+            self.assertIn("not a hardened container", payload["guide"]["security_note"])
+
+    def test_access_guide_is_plain_language_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spark_home = Path(tmpdir) / "spark-home"
+            exit_code, payload = self.run_access("guide", spark_home=spark_home)
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(Path(str(payload["workspace_path"])).exists())
+            self.assertEqual(payload["guide"]["default"]["lane"], "spark_workspace")
+            self.assertIn("safe default", payload["guide"]["plain_default"])
+            self.assertFalse(payload["guide"]["default"]["whole_computer_access"])
 
     def test_access_status_keeps_level5_blocked_without_high_agency_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"SPARK_ALLOW_HIGH_AGENCY_WORKERS": ""}, clear=False):
