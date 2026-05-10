@@ -109,6 +109,32 @@ SAFE_MEMORY_STATUS_KEYS = {
     "non_override_rules",
 }
 
+LABS_CREATOR_SURFACE_FILES = {
+    "release_gate": "src/chip_labs/creator_release_gate.py",
+    "swarm_collective": "src/chip_labs/creator_swarm_collective.py",
+    "operator_review": "src/chip_labs/operator_review.py",
+    "product_runtime_review": "src/chip_labs/product_runtime_review.py",
+}
+
+LABS_CREATOR_RUN_ARTIFACTS = {
+    "created_manifest": "created-artifact-manifest.json",
+    "domain_chip_manifest": "domain-chip/chip.manifest.json",
+    "benchmark_manifest": "benchmark/manifest.json",
+    "specialization_path_manifest": "specialization-path/path.manifest.json",
+    "loop_policy": "autoloop/policy.json",
+    "swarm_contribution": "swarm/contribution_packet.json",
+}
+
+SWARM_PUBLICATION_GOVERNANCE_FILES = {
+    "contract_types": "packages/contracts/src/index.ts",
+    "service_reads": "apps/api/src/collective/service-reads.ts",
+    "sync_validation": "apps/api/src/collective/sync-validation.ts",
+    "publication_signatures": "apps/api/src/collective/publication-proof-signatures.ts",
+    "github_delivery_support": "apps/api/src/collective/delivery-github-support.ts",
+    "pull_request_delivery": "apps/api/src/collective/pull-request-delivery.ts",
+    "github_insight_review_template": "templates/github-insight-review/README.md",
+}
+
 SAFE_BUILDER_EVENT_SAMPLE_COLUMNS = (
     "event_id",
     "created_at",
@@ -910,6 +936,150 @@ def count_files_under(path: Path, *, max_files: int = 5000) -> dict[str, Any]:
     return out
 
 
+def count_schema_files(path: Path, *, max_files: int = 500) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "schema_count": 0,
+        "schemas": [],
+        "redaction": "schema file names only; schema bodies omitted",
+    }
+    if not path.exists():
+        return out
+
+    names: list[str] = []
+    try:
+        for child in sorted(path.glob("*.schema.json"), key=lambda item: item.name.lower()):
+            if not child.is_file():
+                continue
+            names.append(child.name)
+            if len(names) >= max_files:
+                out["max_files_reached"] = True
+                break
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    out["schema_count"] = len(names)
+    out["schemas"] = names
+    return out
+
+
+def inspect_labs_creator_surface(repo_path: Path) -> dict[str, Any] | None:
+    schema_dir = repo_path / "docs" / "creator_system" / "schemas"
+    if not schema_dir.exists() and repo_path.name != "spark-domain-chip-labs":
+        return None
+
+    runs_root = repo_path / "runs"
+    run_count = 0
+    artifact_counts: Counter[str] = Counter()
+    if runs_root.exists():
+        try:
+            for run_dir in runs_root.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                run_count += 1
+                for label, rel_path in LABS_CREATOR_RUN_ARTIFACTS.items():
+                    if (run_dir / rel_path).exists():
+                        artifact_counts[label] += 1
+        except Exception:
+            pass
+
+    return {
+        "repo": repo_path.name,
+        "schema_inventory": count_schema_files(schema_dir),
+        "review_and_release_sources": {
+            label: {"path": str(repo_path / rel_path), "exists": (repo_path / rel_path).exists()}
+            for label, rel_path in LABS_CREATOR_SURFACE_FILES.items()
+        },
+        "creator_run_artifacts": {
+            "run_count": run_count,
+            "artifact_presence_counts": dict(sorted(artifact_counts.items())),
+        },
+        "claim_boundary": (
+            "Creator-system schemas and run artifacts are compatibility and review evidence; "
+            "they are not network publication approval or durable memory truth."
+        ),
+    }
+
+
+def inspect_swarm_specialization_surface(repo_path: Path) -> dict[str, Any] | None:
+    config_path = repo_path / "config" / "specialization-paths.json"
+    schemas_dir = repo_path / "schemas"
+    has_specialization_schema = False
+    if schemas_dir.exists():
+        try:
+            has_specialization_schema = any(schemas_dir.glob("spark-specialization-path*.schema.json"))
+        except Exception:
+            has_specialization_schema = False
+    if (
+        not config_path.exists()
+        and not has_specialization_schema
+        and repo_path.name != "spark-swarm"
+        and "specialization-path" not in repo_path.name
+    ):
+        return None
+
+    config, error = read_json(config_path)
+    path_rows = as_list(as_dict(config).get("paths")) if isinstance(config, dict) else []
+    categories: Counter[str] = Counter()
+    loop_kinds: Counter[str] = Counter()
+    benchmark_adapters: Counter[str] = Counter()
+    evolution_modes: Counter[str] = Counter()
+    rollback_policies: Counter[str] = Counter()
+    for row in path_rows:
+        item = as_dict(row)
+        categories[str(item.get("category") or "[missing]")] += 1
+        runtime = as_dict(item.get("runtime"))
+        benchmark = as_dict(item.get("benchmark"))
+        defaults = as_dict(item.get("specialization_defaults"))
+        mutation = as_dict(item.get("mutation"))
+        loop_kinds[str(runtime.get("loop_kind") or "[missing]")] += 1
+        benchmark_adapters[str(benchmark.get("adapter") or "[missing]")] += 1
+        evolution_modes[str(defaults.get("evolution_mode") or "[missing]")] += 1
+        rollback_policies[str(mutation.get("rollback_policy") or "[missing]")] += 1
+
+    collective_root = repo_path / "collective"
+    promotion_packet_count = 0
+    evidence_ledger_count = 0
+    if collective_root.exists():
+        try:
+            promotion_packet_count = sum(1 for path in collective_root.glob("*/promotion-packet.json") if path.is_file())
+            evidence_ledger_count = sum(1 for path in collective_root.glob("*/evidence-ledger.jsonl") if path.is_file())
+        except Exception:
+            promotion_packet_count = 0
+            evidence_ledger_count = 0
+
+    return {
+        "repo": repo_path.name,
+        "config": {
+            "path": str(config_path),
+            "exists": config_path.exists(),
+            "error": error,
+            "path_count": len(path_rows),
+            "category_counts": dict(sorted(categories.items())),
+            "loop_kind_counts": dict(sorted(loop_kinds.items())),
+            "benchmark_adapter_counts": dict(sorted(benchmark_adapters.items())),
+            "evolution_mode_counts": dict(sorted(evolution_modes.items())),
+            "rollback_policy_counts": dict(sorted(rollback_policies.items())),
+            "redaction": "commands, labels, repo names, descriptions, and path bodies omitted",
+        },
+        "schema_inventory": count_schema_files(schemas_dir),
+        "publication_governance_sources": {
+            label: {"path": str(repo_path / rel_path), "exists": (repo_path / rel_path).exists()}
+            for label, rel_path in SWARM_PUBLICATION_GOVERNANCE_FILES.items()
+        },
+        "collective_artifacts": {
+            "promotion_packet_count": promotion_packet_count,
+            "evidence_ledger_count": evidence_ledger_count,
+        },
+        "claim_boundary": (
+            "Specialization paths and collective packets are review and benchmark surfaces; "
+            "network-visible publication still requires verified proof and approval gates."
+        ),
+    }
+
+
 def summarize_memory_kb_artifacts(builder_home: Path) -> dict[str, Any]:
     root = builder_home / "artifacts" / "spark-memory-kb"
     summary = count_files_under(root)
@@ -1516,8 +1686,11 @@ def build_capability_catalog(repos: list[dict[str, Any]]) -> dict[str, Any]:
     module_capabilities = []
     skill_graphs = []
     contract_sources = []
+    creator_system_surfaces = []
+    specialization_path_surfaces = []
 
     for repo in repos:
+        repo_path = Path(str(repo.get("path") or ""))
         chip = as_dict(repo.get("spark_chip"))
         if chip:
             chip_manifests.append(
@@ -1563,6 +1736,14 @@ def build_capability_catalog(repos: list[dict[str, Any]]) -> dict[str, Any]:
         if contract_files:
             contract_sources.append({"repo": repo.get("name"), "files": contract_files})
 
+        labs_surface = inspect_labs_creator_surface(repo_path)
+        if labs_surface:
+            creator_system_surfaces.append(labs_surface)
+
+        swarm_surface = inspect_swarm_specialization_surface(repo_path)
+        if swarm_surface:
+            specialization_path_surfaces.append(swarm_surface)
+
     return {
         "schema_version": CAPABILITY_CATALOG_SCHEMA,
         "generated_at": utc_now(),
@@ -1571,6 +1752,8 @@ def build_capability_catalog(repos: list[dict[str, Any]]) -> dict[str, Any]:
         "module_capabilities": module_capabilities,
         "skill_graphs": skill_graphs,
         "contract_sources": contract_sources,
+        "creator_system_surfaces": creator_system_surfaces,
+        "specialization_path_surfaces": specialization_path_surfaces,
     }
 
 
@@ -1855,6 +2038,8 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
         "gaps": len(as_list(system_map.get("gaps"))),
         "chip_manifests": len(as_list(capability_catalog.get("chip_manifests"))),
         "skill_graphs": len(as_list(capability_catalog.get("skill_graphs"))),
+        "creator_system_surfaces": len(as_list(capability_catalog.get("creator_system_surfaces"))),
+        "specialization_path_surfaces": len(as_list(capability_catalog.get("specialization_path_surfaces"))),
         "authority_sources": {
             key: as_dict(value).get("exists")
             for key, value in as_dict(as_dict(compiled["authority_view"]).get("observed_sources")).items()

@@ -11,7 +11,9 @@ from pathlib import Path
 
 from spark_cli.cli import build_parser
 from spark_cli.system_map import (
+    build_capability_catalog,
     build_memory_movement_index,
+    collect_repo_metadata,
     count_safe_jsonl,
     inspect_builder_event_samples,
     inspect_builder_trace_health,
@@ -207,6 +209,96 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("My private fact", encoded)
         self.assertNotIn("telegram-token-value", encoded)
         self.assertNotIn("human-telegram-123-profile-preferred-name", encoded)
+
+    def test_capability_catalog_projects_labs_and_swarm_surfaces_without_bodies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            labs = root / "spark-domain-chip-labs"
+            swarm = root / "spark-swarm"
+            (labs / "docs" / "creator_system" / "schemas").mkdir(parents=True)
+            (labs / "src" / "chip_labs").mkdir(parents=True)
+            (labs / "runs" / "demo" / "benchmark").mkdir(parents=True)
+            (labs / "runs" / "demo" / "swarm").mkdir(parents=True)
+            (swarm / "config").mkdir(parents=True)
+            (swarm / "schemas").mkdir(parents=True)
+            (swarm / "packages" / "contracts" / "src").mkdir(parents=True)
+            (swarm / "apps" / "api" / "src" / "collective").mkdir(parents=True)
+            (swarm / "collective" / "demo").mkdir(parents=True)
+
+            (labs / "spark-chip.json").write_text(
+                json.dumps({"schema_version": "spark-chip.v1", "chip_name": "labs", "capabilities": []}),
+                encoding="utf-8",
+            )
+            (labs / "docs" / "creator_system" / "schemas" / "creator-release-gate.schema.json").write_text(
+                '{"private": "schema body should stay out"}',
+                encoding="utf-8",
+            )
+            (labs / "src" / "chip_labs" / "creator_release_gate.py").write_text("# private implementation", encoding="utf-8")
+            (labs / "runs" / "demo" / "created-artifact-manifest.json").write_text(
+                '{"private": "run body should stay out"}',
+                encoding="utf-8",
+            )
+            (labs / "runs" / "demo" / "benchmark" / "manifest.json").write_text(
+                '{"private": "benchmark body should stay out"}',
+                encoding="utf-8",
+            )
+
+            (swarm / "spark-chip.json").write_text(
+                json.dumps({"schema_version": "spark-chip.v1", "chip_name": "swarm", "capabilities": []}),
+                encoding="utf-8",
+            )
+            (swarm / "schemas" / "spark-specialization-path-agent-gate.schema.json").write_text(
+                '{"private": "schema body should stay out"}',
+                encoding="utf-8",
+            )
+            (swarm / "config" / "specialization-paths.json").write_text(
+                json.dumps(
+                    {
+                        "paths": [
+                            {
+                                "key": "secret-key-should-stay-out",
+                                "label": "Private label should stay out",
+                                "category": "startup",
+                                "primary_command": "secret command should stay out",
+                                "specialization_defaults": {"evolution_mode": "review_required"},
+                                "runtime": {"loop_kind": "benchmark"},
+                                "benchmark": {"adapter": "startup-bench"},
+                                "mutation": {"rollback_policy": "single_round_git_revert"},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (swarm / "packages" / "contracts" / "src" / "index.ts").write_text("// private contracts", encoding="utf-8")
+            (swarm / "apps" / "api" / "src" / "collective" / "sync-validation.ts").write_text(
+                "// private validation",
+                encoding="utf-8",
+            )
+            (swarm / "collective" / "demo" / "promotion-packet.json").write_text(
+                '{"private": "packet body should stay out"}',
+                encoding="utf-8",
+            )
+
+            catalog = build_capability_catalog([collect_repo_metadata(labs), collect_repo_metadata(swarm)])
+
+        encoded = json.dumps(catalog)
+        self.assertEqual(len(catalog["creator_system_surfaces"]), 1)
+        self.assertEqual(len(catalog["specialization_path_surfaces"]), 1)
+        labs_surface = catalog["creator_system_surfaces"][0]
+        swarm_surface = catalog["specialization_path_surfaces"][0]
+        self.assertEqual(labs_surface["schema_inventory"]["schema_count"], 1)
+        self.assertEqual(labs_surface["creator_run_artifacts"]["run_count"], 1)
+        self.assertEqual(labs_surface["creator_run_artifacts"]["artifact_presence_counts"]["created_manifest"], 1)
+        self.assertEqual(swarm_surface["config"]["path_count"], 1)
+        self.assertEqual(swarm_surface["config"]["category_counts"]["startup"], 1)
+        self.assertEqual(swarm_surface["config"]["benchmark_adapter_counts"]["startup-bench"], 1)
+        self.assertTrue(swarm_surface["publication_governance_sources"]["contract_types"]["exists"])
+        self.assertEqual(swarm_surface["collective_artifacts"]["promotion_packet_count"], 1)
+        self.assertNotIn("schema body should stay out", encoded)
+        self.assertNotIn("run body should stay out", encoded)
+        self.assertNotIn("secret command should stay out", encoded)
+        self.assertNotIn("secret-key-should-stay-out", encoded)
 
     def test_builder_event_samples_omit_event_bodies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
