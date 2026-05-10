@@ -87,6 +87,8 @@ SAFE_SPAWNER_PRD_TRACE_FIELDS = (
     "event",
     "requestId",
     "missionId",
+    "traceRef",
+    "trace_ref",
     "provider",
     "buildMode",
     "timeoutMs",
@@ -608,10 +610,17 @@ def inspect_spawner_prd_auto_trace(path: Path, *, builder_home: Path) -> dict[st
         path,
         source="spawner_prd_auto_trace",
         safe_fields=SAFE_SPAWNER_PRD_TRACE_FIELDS,
-        identifier_fields={"requestId": "request_id", "missionId": "request_id"},
+        identifier_fields={
+            "requestId": "request_id",
+            "missionId": "request_id",
+            "traceRef": "trace_ref",
+            "trace_ref": "trace_ref",
+        },
     )
     request_ids: set[str] = set()
     mission_ids: set[str] = set()
+    trace_refs: set[str] = set()
+    derived_trace_refs: set[str] = set()
     if path.exists():
         try:
             with path.open("r", encoding="utf-8") as handle:
@@ -626,17 +635,32 @@ def inspect_spawner_prd_auto_trace(path: Path, *, builder_home: Path) -> dict[st
                         continue
                     request_id = payload.get("requestId")
                     mission_id = payload.get("missionId")
+                    trace_ref = payload.get("traceRef") or payload.get("trace_ref")
                     if isinstance(request_id, str) and request_id.strip():
                         request_ids.add(request_id.strip())
                     if isinstance(mission_id, str) and mission_id.strip():
-                        mission_ids.add(mission_id.strip())
+                        clean_mission_id = mission_id.strip()
+                        mission_ids.add(clean_mission_id)
+                        derived_trace_refs.add(f"trace:spawner-prd:{clean_mission_id}")
+                    if isinstance(trace_ref, str) and trace_ref.strip():
+                        trace_refs.add(trace_ref.strip())
         except Exception as exc:
             out["join_error"] = f"{type(exc).__name__}: {exc}"
+    effective_trace_refs = set(trace_refs)
+    effective_trace_refs.update(derived_trace_refs)
     out["join_keys"] = {
         "request_id_count": len(request_ids),
         "mission_id_count": len(mission_ids),
+        "trace_ref_count": len(trace_refs),
+        "derived_trace_ref_count": len(derived_trace_refs),
+    }
+    out["derived_trace_contract"] = {
+        "scheme": "trace:spawner-prd:<missionId>",
+        "source": "missionId",
+        "status": "derived_available" if derived_trace_refs else "missing_mission_id",
     }
     out["builder_request_overlap"] = inspect_builder_request_id_overlap(builder_home, request_ids)
+    out["builder_trace_ref_overlap"] = inspect_builder_trace_ref_overlap(builder_home, effective_trace_refs)
     return out
 
 
@@ -675,6 +699,48 @@ def inspect_builder_request_id_overlap(builder_home: Path, request_ids: set[str]
                 candidates,
             ).fetchone()[0]
             out["matched_builder_request_id_count"] = int(matched or 0)
+        finally:
+            conn.close()
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def inspect_builder_trace_ref_overlap(builder_home: Path, trace_refs: set[str]) -> dict[str, Any]:
+    db_path = builder_home / "state.db"
+    out: dict[str, Any] = {
+        "source": "builder_events",
+        "exists": db_path.exists(),
+        "checked_trace_ref_count": len(trace_refs),
+        "redaction": "overlap counts only; trace ref values omitted",
+    }
+    if not trace_refs or not db_path.exists():
+        out["matched_builder_trace_ref_count"] = 0
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            tables = [row[0] for row in conn.execute("select name from sqlite_master where type='table'")]
+            if "builder_events" not in tables:
+                out["table_exists"] = False
+                out["matched_builder_trace_ref_count"] = 0
+                return out
+            columns = [row[1] for row in conn.execute("pragma table_info(builder_events)")]
+            if "trace_ref" not in columns:
+                out["trace_ref_column_exists"] = False
+                out["matched_builder_trace_ref_count"] = 0
+                return out
+            candidates = sorted(trace_refs)[:500]
+            placeholders = ",".join("?" for _ in candidates)
+            matched = conn.execute(
+                f"""
+                select count(distinct trace_ref)
+                from builder_events
+                where trace_ref in ({placeholders})
+                """,
+                candidates,
+            ).fetchone()[0]
+            out["matched_builder_trace_ref_count"] = int(matched or 0)
         finally:
             conn.close()
     except Exception as exc:

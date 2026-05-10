@@ -80,8 +80,11 @@ class SparkSystemMapTests(unittest.TestCase):
             builder_home.mkdir()
             conn = sqlite3.connect(builder_home / "state.db")
             try:
-                conn.execute("create table builder_events(request_id text)")
-                conn.execute("insert into builder_events(request_id) values (?)", ("req-1",))
+                conn.execute("create table builder_events(request_id text, trace_ref text)")
+                conn.execute(
+                    "insert into builder_events(request_id, trace_ref) values (?, ?)",
+                    ("req-1", "trace:spawner-prd:mission-1"),
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -139,7 +142,11 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(final_summary["trace_join"]["status"], "missing_join_key")
         self.assertEqual(spawner_summary["join_keys"]["request_id_count"], 2)
         self.assertEqual(spawner_summary["join_keys"]["mission_id_count"], 1)
+        self.assertEqual(spawner_summary["join_keys"]["trace_ref_count"], 0)
+        self.assertEqual(spawner_summary["join_keys"]["derived_trace_ref_count"], 1)
+        self.assertEqual(spawner_summary["derived_trace_contract"]["status"], "derived_available")
         self.assertEqual(spawner_summary["builder_request_overlap"]["matched_builder_request_id_count"], 1)
+        self.assertEqual(spawner_summary["builder_trace_ref_overlap"]["matched_builder_trace_ref_count"], 1)
         self.assertEqual(spawner_summary["samples"][0]["requestId"], "req-1")
         self.assertNotIn("private answer", encoded)
         self.assertNotIn("token=secret", encoded)
