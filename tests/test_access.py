@@ -113,6 +113,25 @@ class AccessSetupTests(unittest.TestCase):
             self.assertEqual(payload["os_family"], family)
             self.assertIn(hint, payload["guide"]["os_note"])
 
+    def test_access_status_reports_lower_levels_without_sandbox_setup(self) -> None:
+        cases = [
+            ("1", "chat_memory", "chat"),
+            ("2", "requested_missions", "missions"),
+            ("3", "public_research", "research"),
+        ]
+        for level, lane_id, activation_state in cases:
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as tmpdir:
+                exit_code, payload = self.run_access("status", "--level", level, spark_home=Path(tmpdir) / "spark-home")
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(payload["access_level"], int(level))
+            self.assertEqual(payload["effective_access_level"], int(level))
+            self.assertEqual(payload["recommended"]["id"], lane_id)
+            self.assertEqual(payload["state_machine"]["activation_state"], activation_state)
+            self.assertFalse(payload["state_machine"]["can_operate_whole_computer"])
+            self.assertEqual(payload["guide"]["default"]["codex_sandbox"], "none")
+            self.assertIn("do not need sandbox setup", payload["guide"]["plain_default"])
+
     def test_access_status_keeps_level5_blocked_without_high_agency_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {"SPARK_ALLOW_HIGH_AGENCY_WORKERS": ""}, clear=False):
             exit_code, payload = self.run_access("status", "--level", "5", spark_home=Path(tmpdir) / "spark-home")

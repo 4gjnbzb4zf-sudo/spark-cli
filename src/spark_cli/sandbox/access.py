@@ -23,6 +23,29 @@ LEVEL5_ENV = {
 DEFAULT_ACCESS_LEVEL = 4
 DEFAULT_SANDBOX_LANE = "spark_workspace"
 DEFAULT_CODEX_SANDBOX = "workspace-write"
+LOWER_ACCESS_PROFILES: dict[int, dict[str, str]] = {
+    1: {
+        "id": "chat_memory",
+        "label": "Chat, Memory, and Diagnostics",
+        "activation_state": "chat",
+        "user_message": "Level 1 is ready for chat, memory, recall, and diagnostics. It does not grant mission or local file access.",
+        "next": "Use `/access 2`, `/access 3`, or `/access 4` in Telegram when you want missions, research, or local workspace work.",
+    },
+    2: {
+        "id": "requested_missions",
+        "label": "Requested Missions",
+        "activation_state": "missions",
+        "user_message": "Level 2 is ready for explicitly requested missions and builds. It still does not grant public research or local file access.",
+        "next": "Use `/access 3` for public research or `/access 4` for safe local workspace work.",
+    },
+    3: {
+        "id": "public_research",
+        "label": "Public Research",
+        "activation_state": "research",
+        "user_message": "Level 3 is ready for public web and GitHub research plus requested missions. It still does not grant local file access.",
+        "next": "Use `/access 4` when Spark should prepare a safe local workspace.",
+    },
+}
 
 
 def access_os_family(platform: str | None = None) -> str:
@@ -258,6 +281,39 @@ def access_guide_payload(payload: dict[str, Any]) -> dict[str, Any]:
     workspace_preflight = payload.get("workspace_preflight") if isinstance(payload.get("workspace_preflight"), dict) else {}
     workspace_ready = bool(workspace_preflight.get("writable"))
     family = str(payload.get("os_family") or "unknown")
+    if level < 4:
+        profile = LOWER_ACCESS_PROFILES.get(level, LOWER_ACCESS_PROFILES[1])
+        return {
+            "summary": profile["user_message"],
+            "plain_default": "Levels 1-3 do not need sandbox setup because they do not grant local file access.",
+            "security_note": "Spark should not touch local files until Level 4 workspace access or Level 5 operator mode is explicitly selected.",
+            "os_note": "This access level works the same on macOS, Windows, Linux, and WSL.",
+            "default": {
+                "access_level": level,
+                "lane": profile["id"],
+                "codex_sandbox": "none",
+                "whole_computer_access": False,
+            },
+            "stronger_sandbox_order": ["spark_workspace", "docker", "modal", "ssh"],
+            "steps": [
+                {
+                    "id": profile["id"],
+                    "title": profile["label"],
+                    "status": "ready",
+                    "automatic": True,
+                    "user_message": profile["user_message"],
+                    "spark_cli_action": f"spark access status --level {level}",
+                },
+                {
+                    "id": "local_workspace",
+                    "title": "Safe local workspace",
+                    "status": "available_at_level_4",
+                    "automatic": True,
+                    "user_message": "When the user chooses Level 4, Spark can create the safe workspace automatically.",
+                    "spark_cli_action": "spark access setup",
+                },
+            ],
+        }
     level5 = payload.get("level5") if isinstance(payload.get("level5"), dict) else {}
     level5_state = str(level5.get("activation_state") or "")
     if not level5_state:
@@ -429,6 +485,75 @@ def access_lane_payload(
 ) -> dict[str, Any]:
     env_values = env or os.environ
     written_level5_env: dict[str, str] = {}
+    if level < 4:
+        family = access_os_family()
+        profile = LOWER_ACCESS_PROFILES.get(level, LOWER_ACCESS_PROFILES[1])
+        workspace_root = spark_workspace_root(home=home, env=env_values)
+        workspace_path = workspace_root / "default"
+        workspace_preflight = {
+            "exists": workspace_path.exists(),
+            "writable": False,
+            "detail": f"Level {level} does not require local workspace setup.",
+        }
+        recommended = {
+            "id": profile["id"],
+            "label": profile["label"],
+            "available": True,
+            "setup_mode": "automatic",
+            "spark_cli_action": f"spark access status --level {level}",
+            "user_message": profile["user_message"],
+            "os_hint": "Levels 1-3 have the same access meaning on macOS, Windows, Linux, and WSL.",
+            "recommended": True,
+        }
+        next_action = profile["next"]
+        return {
+            "ok": True,
+            "access_level": level,
+            "effective_access_level": level,
+            "os_family": family,
+            "workspace_root": str(workspace_root),
+            "workspace_path": str(workspace_path),
+            "workspace_preflight": workspace_preflight,
+            "level5": {
+                "enabled": False,
+                "configured": False,
+                "activation_state": "blocked",
+                "process_enabled": False,
+                "external_paths": False,
+                "codex_sandbox": "none",
+                "configured_codex_sandbox": "",
+                "restart_required": False,
+                "env_files": {},
+                "audit": {},
+                "disable_command": "spark access disable-level5",
+            },
+            "state_machine": {
+                "requested_access_level": level,
+                "effective_access_level": level,
+                "activation_state": profile["activation_state"],
+                "requires_restart": False,
+                "can_operate_whole_computer": False,
+                "persistent": True,
+            },
+            "setup_ran": False,
+            "recommended": recommended,
+            "lanes": [recommended],
+            "next": next_action,
+            "automation": access_automation_payload(
+                level=level,
+                next_action=next_action,
+                recommended_id=profile["id"],
+                level5_activation_state="blocked",
+                docker_ready=False,
+            ),
+            "guide": access_guide_payload({
+                "access_level": level,
+                "os_family": family,
+                "workspace_path": str(workspace_path),
+                "workspace_preflight": workspace_preflight,
+                "level5": {"enabled": False, "restart_required": False, "activation_state": "blocked"},
+            }),
+        }
     if setup and level >= 5 and enable_high_agency:
         written_level5_env = persist_level5_guardrails(home=home, env=env_values)
     family = access_os_family()
