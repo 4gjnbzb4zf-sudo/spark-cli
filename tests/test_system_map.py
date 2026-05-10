@@ -11,6 +11,7 @@ from pathlib import Path
 
 from spark_cli.cli import build_parser
 from spark_cli.system_map import (
+    build_authority_view,
     build_capability_catalog,
     build_memory_movement_index,
     collect_repo_metadata,
@@ -303,6 +304,160 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("run body should stay out", encoded)
         self.assertNotIn("secret command should stay out", encoded)
         self.assertNotIn("secret-key-should-stay-out", encoded)
+
+    def test_authority_view_projects_policy_contracts_without_secret_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            desktop = Path(tmp)
+            cli_sandbox = desktop / "spark-cli" / "src" / "spark_cli" / "sandbox"
+            telegram = desktop / "spark-telegram-bot" / "src"
+            spawner_server = desktop / "spawner-ui" / "src" / "lib" / "server"
+            browser_protocol = desktop / "spark-browser-extension" / "src" / "protocol"
+            swarm_collective = desktop / "spark-swarm" / "apps" / "api" / "src" / "collective"
+            labs_src = desktop / "spark-domain-chip-labs" / "src" / "chip_labs"
+            for path in (cli_sandbox, telegram, spawner_server, browser_protocol, swarm_collective, labs_src):
+                path.mkdir(parents=True)
+
+            (cli_sandbox / "access.py").write_text(
+                """
+LEVEL5_ENV = {
+    "SPARK_ALLOW_HIGH_AGENCY_WORKERS": "1",
+    "SPARK_ALLOW_EXTERNAL_PROJECT_PATHS": "1",
+    "SPARK_CODEX_SANDBOX": "danger-full-access",
+}
+DEFAULT_ACCESS_LEVEL = 4
+DEFAULT_SANDBOX_LANE = "spark_workspace"
+DEFAULT_CODEX_SANDBOX = "workspace-write"
+LOWER_ACCESS_PROFILES = {
+    1: {"id": "chat_memory", "label": "Chat", "activation_state": "chat"},
+    2: {"id": "requested_missions", "label": "Missions", "activation_state": "missions"},
+}
+""",
+                encoding="utf-8",
+            )
+            (cli_sandbox / "capabilities.py").write_text(
+                """
+FilesystemCapability = Literal["none", "workspace", "host"]
+TOXIC_CAPABILITY_PAIRS = (
+    ("secret_access", "network_write", "Secret access plus network write can exfiltrate credentials."),
+)
+""",
+                encoding="utf-8",
+            )
+            (telegram / "accessPolicy.ts").write_text(
+                """
+export type SparkAccessProfile = 'chat' | 'builder' | 'agent' | 'developer' | 'operator';
+export type SparkAccessRequirement = 'spawner_build' | 'external_research' | 'operating_system';
+export function sparkAccessAllowsExternalResearch(profile: SparkAccessProfile): boolean {
+  return profile === 'agent' || profile === 'developer' || profile === 'operator';
+}
+export function sparkAccessAllowsSpawnerBuilds(profile: SparkAccessProfile): boolean {
+  return profile !== 'chat';
+}
+export function sparkAccessAllowsOperatingSystemWork(profile: SparkAccessProfile): boolean {
+  return profile === 'developer' || profile === 'operator';
+}
+export function sparkAccessLevel(profile: SparkAccessProfile): number {
+  switch (profile) {
+    case 'chat': return 1;
+    case 'agent': return 3;
+    case 'developer': return 4;
+    case 'operator': return 5;
+    case 'builder':
+    default: return 2;
+  }
+}
+export function sparkLevel5RuntimeGuardrailsActive(): boolean { return true; }
+const secretExample = 'telegram.bot_token';
+""",
+                encoding="utf-8",
+            )
+            (spawner_server / "access-execution-lanes.ts").write_text(
+                """
+export type AccessExecutionLaneId = 'spark_workspace' | 'docker' | 'level5_operator';
+export type AccessRunPolicy = 'auto_safe' | 'auto_read_only' | 'confirm_once' | 'explicit_opt_in';
+""",
+                encoding="utf-8",
+            )
+            (spawner_server / "access-execution-actions.ts").write_text(
+                """
+export const ACCESS_EXECUTION_ACTIONS = {
+  workspace_setup: {
+    id: 'workspace_setup',
+    laneId: 'spark_workspace',
+    displayCommand: 'spark access setup',
+    runPolicy: 'auto_safe',
+  },
+  level5_enable: {
+    id: 'level5_enable',
+    laneId: 'level5_operator',
+    displayCommand: 'spark access setup --level 5 --enable-high-agency',
+    runPolicy: 'explicit_opt_in',
+    confirmation: 'Enable whole-computer operator mode',
+    rollback: 'spark access disable-level5',
+  }
+};
+""",
+                encoding="utf-8",
+            )
+            (spawner_server / "high-agency-workers.ts").write_text(
+                "const keys = ['SPARK_ALLOW_HIGH_AGENCY_WORKERS', 'SPARK_CODEX_SANDBOX'];\n",
+                encoding="utf-8",
+            )
+            (spawner_server / "mission-control-access.ts").write_text(
+                """
+export type MissionControlAccessMode = 'hosted' | 'lan' | 'local-only';
+const defaults = { defaultPayload: 'status-metadata', privatePayloadsStayLocal: true };
+""",
+                encoding="utf-8",
+            )
+            (browser_protocol / "constants.js").write_text(
+                """
+export const RISK_CLASSES = { READ_ONLY: "read_only", HIGH_RISK_ACTION: "high_risk_action" };
+export const APPROVAL_MODES = { NOT_REQUIRED: "not_required", ASK_ONCE: "ask_once" };
+export const HOOK_DEFINITIONS = {
+  status: { risk_class: RISK_CLASSES.READ_ONLY, approval_mode: APPROVAL_MODES.NOT_REQUIRED, requires_origin_scope: false },
+  click: { risk_class: RISK_CLASSES.HIGH_RISK_ACTION, approval_mode: APPROVAL_MODES.ASK_ONCE, requires_origin_scope: true }
+};
+""",
+                encoding="utf-8",
+            )
+            (browser_protocol / "policy.js").write_text(
+                "export function classifySensitiveSurface() {}\n",
+                encoding="utf-8",
+            )
+            (swarm_collective / "sync-validation.ts").write_text(
+                """
+const REQUIRED_PUBLICATION_WORKFLOW = "spark-insight-review"
+const REQUIRED_PUBLICATION_CHECKS = ["spark-insight-schema", "spark-insight-secrets"] as const
+""",
+                encoding="utf-8",
+            )
+            for rel_path in (
+                "creator_release_gate.py",
+                "creator_swarm_collective.py",
+                "operator_review.py",
+                "product_runtime_review.py",
+            ):
+                (labs_src / rel_path).write_text("# gate\n", encoding="utf-8")
+
+            view = build_authority_view(
+                desktop,
+                {"telegram_profile_count": 1, "primary_telegram_profile": "main"},
+            )
+            encoded = json.dumps(view)
+
+            self.assertEqual(view["default_access_level_hint"], 4)
+            self.assertEqual(view["cli_access"]["default_sandbox_lane"], "spark_workspace")
+            self.assertEqual(view["cli_capability_policy"]["toxic_pair_count"], 1)
+            self.assertIn("developer", view["telegram_access_policy"]["allow_matrix"]["operating_system"])
+            self.assertEqual(view["spawner_execution_policy"]["confirmation_gated_action_count"], 1)
+            self.assertEqual(view["browser_authority"]["risk_class_counts"]["high_risk_action"], 1)
+            self.assertEqual(
+                view["public_output_authority"]["required_publication_checks"],
+                ["spark-insight-schema", "spark-insight-secrets"],
+            )
+            self.assertEqual(view["guardrail_summary"]["publication_checks_required"], 2)
+            self.assertNotIn("telegram.bot_token", encoded)
 
     def test_builder_event_samples_omit_event_bodies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -689,6 +844,28 @@ routes = []
             self.assertEqual(capability_exit_code, 0)
             self.assertEqual(capability_summary["schema_version"], "spark.os_capabilities.summary.v0")
             self.assertEqual(capability_summary["card_count"], 0)
+
+            authority_args = build_parser().parse_args(
+                [
+                    "os",
+                    "authority",
+                    "--desktop",
+                    str(desktop),
+                    "--spark-home",
+                    str(spark_home),
+                    "--registry",
+                    str(registry),
+                    "--json",
+                ]
+            )
+            authority_stdout = StringIO()
+            with redirect_stdout(authority_stdout):
+                authority_exit_code = authority_args.func(authority_args)
+            authority_summary = json.loads(authority_stdout.getvalue())
+
+            self.assertEqual(authority_exit_code, 0)
+            self.assertEqual(authority_summary["schema_version"], "spark.os_authority.summary.v0")
+            self.assertIn("guardrail_summary", authority_summary)
 
 
 if __name__ == "__main__":

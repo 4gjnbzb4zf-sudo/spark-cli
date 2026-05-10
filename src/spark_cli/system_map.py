@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 import re
 import sqlite3
@@ -1883,38 +1884,410 @@ def build_capability_catalog(repos: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def read_text_or_none(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except Exception:
+        return None
+
+
+def literal_assignment(text: str | None, name: str) -> Any:
+    if not text:
+        return None
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+                try:
+                    return ast.literal_eval(node.value)
+                except Exception:
+                    return None
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            try:
+                return ast.literal_eval(node.value)
+            except Exception:
+                return None
+    return None
+
+
+def regex_int(text: str | None, pattern: str) -> int | None:
+    if not text:
+        return None
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def regex_string(text: str | None, pattern: str) -> str | None:
+    if not text:
+        return None
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def parse_ts_union(text: str | None, type_name: str) -> list[str]:
+    if not text:
+        return []
+    match = re.search(rf"export\s+type\s+{re.escape(type_name)}\s*=\s*([^;]+);", text, re.S)
+    if not match:
+        return []
+    return re.findall(r"'([^']+)'|\"([^\"]+)\"", match.group(1))
+
+
+def clean_ts_union(values: list[tuple[str, str]] | list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for value in values:
+        if isinstance(value, tuple):
+            item = next((part for part in value if part), "")
+        else:
+            item = value
+        if item and item not in cleaned:
+            cleaned.append(item)
+    return cleaned
+
+
+def parse_ts_union_values(text: str | None, type_name: str) -> list[str]:
+    return clean_ts_union(parse_ts_union(text, type_name))
+
+
+def ts_function_body(text: str | None, function_name: str) -> str:
+    if not text:
+        return ""
+    match = re.search(
+        rf"export\s+function\s+{re.escape(function_name)}\s*\([^)]*\)[^{{]*{{(?P<body>.*?)\n}}",
+        text,
+        re.S,
+    )
+    return match.group("body") if match else ""
+
+
+def ts_allowed_profiles(text: str | None, function_name: str, profiles: list[str]) -> list[str]:
+    body = ts_function_body(text, function_name)
+    if not body:
+        return []
+    denied = set(re.findall(r"profile\s*!==\s*'([^']+)'", body))
+    if denied:
+        return [profile for profile in profiles if profile not in denied]
+    allowed = re.findall(r"profile\s*===\s*'([^']+)'", body)
+    return [profile for profile in profiles if profile in set(allowed)]
+
+
+def parse_ts_access_levels(text: str | None) -> dict[str, int]:
+    body = ts_function_body(text, "sparkAccessLevel")
+    levels: dict[str, int] = {}
+    for profile, level in re.findall(r"case\s+'([^']+)':\s*return\s+(\d+)", body):
+        levels[profile] = int(level)
+    default_match = re.search(r"default:\s*return\s+(\d+)", body)
+    if default_match:
+        for profile in ("builder",):
+            levels.setdefault(profile, int(default_match.group(1)))
+    return levels
+
+
+def inspect_cli_access_source(path: Path) -> dict[str, Any]:
+    text = read_text_or_none(path)
+    lower_profiles = literal_assignment(text, "LOWER_ACCESS_PROFILES")
+    profiles = []
+    if isinstance(lower_profiles, dict):
+        for level, payload in sorted(lower_profiles.items()):
+            profile = as_dict(payload)
+            profiles.append(
+                {
+                    "level": level,
+                    "id": profile.get("id"),
+                    "label": profile.get("label"),
+                    "activation_state": profile.get("activation_state"),
+                }
+            )
+
+    level5_env = literal_assignment(text, "LEVEL5_ENV")
+    return {
+        "source": str(path),
+        "exists": path.exists(),
+        "default_access_level": regex_int(text, r"DEFAULT_ACCESS_LEVEL\s*=\s*(\d+)"),
+        "default_sandbox_lane": regex_string(text, r"DEFAULT_SANDBOX_LANE\s*=\s*['\"]([^'\"]+)['\"]"),
+        "default_codex_sandbox": regex_string(text, r"DEFAULT_CODEX_SANDBOX\s*=\s*['\"]([^'\"]+)['\"]"),
+        "lower_access_profiles": profiles,
+        "level5_guardrail_keys": sorted(level5_env.keys()) if isinstance(level5_env, dict) else [],
+        "level5_guardrail_contract": (
+            "Level 5 requires high-agency workers, external-project opt-in, and danger-full-access sandbox."
+            if isinstance(level5_env, dict)
+            else "missing"
+        ),
+    }
+
+
+def inspect_cli_capability_source(path: Path) -> dict[str, Any]:
+    text = read_text_or_none(path)
+    toxic_pairs = literal_assignment(text, "TOXIC_CAPABILITY_PAIRS")
+    dimensions = []
+    for name, body in re.findall(r"(\w+Capability)\s*=\s*Literal\[(.*?)\]", text or "", re.S):
+        dimensions.append({"dimension": name.replace("Capability", "").lower(), "values": clean_ts_union(re.findall(r"'([^']+)'|\"([^\"]+)\"", body))})
+
+    safe_pairs = []
+    if isinstance(toxic_pairs, tuple):
+        for pair in toxic_pairs:
+            if isinstance(pair, tuple) and len(pair) >= 3:
+                safe_pairs.append({"left": pair[0], "right": pair[1], "reason": pair[2]})
+
+    return {
+        "source": str(path),
+        "exists": path.exists(),
+        "capability_dimensions": dimensions,
+        "toxic_capability_pairs": safe_pairs,
+        "toxic_pair_count": len(safe_pairs),
+    }
+
+
+def inspect_telegram_access_source(path: Path) -> dict[str, Any]:
+    text = read_text_or_none(path)
+    profiles = parse_ts_union_values(text, "SparkAccessProfile")
+    requirements = parse_ts_union_values(text, "SparkAccessRequirement")
+    access_levels = parse_ts_access_levels(text)
+    matrix = {
+        "spawner_build": ts_allowed_profiles(text, "sparkAccessAllowsSpawnerBuilds", profiles),
+        "external_research": ts_allowed_profiles(text, "sparkAccessAllowsExternalResearch", profiles),
+        "operating_system": ts_allowed_profiles(text, "sparkAccessAllowsOperatingSystemWork", profiles),
+    }
+    return {
+        "source": str(path),
+        "exists": path.exists(),
+        "profiles": [{"profile": profile, "level": access_levels.get(profile)} for profile in profiles],
+        "requirements": requirements,
+        "allow_matrix": {key: value for key, value in matrix.items() if value},
+        "runtime_guardrails": {
+            "hosted_full_access_env_checked": "SPARK_ALLOW_HOSTED_FULL_ACCESS" in (text or ""),
+            "level5_guardrails_checked": "sparkLevel5RuntimeGuardrailsActive" in (text or ""),
+            "high_agency_worker_env_checked": "SPARK_ALLOW_HIGH_AGENCY_WORKERS" in (text or ""),
+        },
+    }
+
+
+def extract_js_object_block(text: str | None, marker: str) -> str:
+    if not text:
+        return ""
+    marker_index = text.find(marker)
+    if marker_index < 0:
+        return ""
+    start = text.find("{", marker_index)
+    if start < 0:
+        return ""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : index]
+    return ""
+
+
+def inspect_spawner_access_sources(root: Path) -> dict[str, Any]:
+    lanes_path = root / "src" / "lib" / "server" / "access-execution-lanes.ts"
+    actions_path = root / "src" / "lib" / "server" / "access-execution-actions.ts"
+    high_agency_path = root / "src" / "lib" / "server" / "high-agency-workers.ts"
+    mission_access_path = root / "src" / "lib" / "server" / "mission-control-access.ts"
+    lanes_text = read_text_or_none(lanes_path)
+    actions_text = read_text_or_none(actions_path)
+    high_agency_text = read_text_or_none(high_agency_path)
+    mission_access_text = read_text_or_none(mission_access_path)
+
+    actions = []
+    actions_block = extract_js_object_block(actions_text, "ACCESS_EXECUTION_ACTIONS")
+    action_matches = list(re.finditer(r"^\s*(\w+):\s*{", actions_block, re.M))
+    for index, match in enumerate(action_matches):
+        action_id = match.group(1)
+        next_start = action_matches[index + 1].start() if index + 1 < len(action_matches) else len(actions_block)
+        body = actions_block[match.end() : next_start]
+        actions.append(
+            {
+                "id": regex_string(body, r"id:\s*'([^']+)'") or action_id,
+                "lane_id": regex_string(body, r"laneId:\s*'([^']+)'"),
+                "display_command": regex_string(body, r"displayCommand:\s*'([^']+)'"),
+                "run_policy": regex_string(body, r"runPolicy:\s*'([^']+)'"),
+                "confirmation_required": "confirmation:" in body,
+                "rollback_declared": "rollback:" in body,
+            }
+        )
+
+    return {
+        "sources": {
+            "lanes": {"path": str(lanes_path), "exists": lanes_path.exists()},
+            "actions": {"path": str(actions_path), "exists": actions_path.exists()},
+            "high_agency": {"path": str(high_agency_path), "exists": high_agency_path.exists()},
+            "mission_control_access": {"path": str(mission_access_path), "exists": mission_access_path.exists()},
+        },
+        "lane_ids": parse_ts_union_values(lanes_text, "AccessExecutionLaneId"),
+        "run_policies": parse_ts_union_values(lanes_text, "AccessRunPolicy"),
+        "fixed_actions": actions,
+        "confirmation_gated_action_count": sum(1 for action in actions if action.get("confirmation_required")),
+        "level5_guardrail_keys": sorted(set(re.findall(r"SPARK_[A-Z0-9_]+", high_agency_text or ""))),
+        "mission_control_modes": parse_ts_union_values(mission_access_text, "MissionControlAccessMode"),
+        "mobile_privacy_contract": {
+            "status_metadata_default": "status-metadata" in (mission_access_text or ""),
+            "private_payloads_stay_local": "privatePayloadsStayLocal" in (mission_access_text or ""),
+        },
+    }
+
+
+def js_const_object_values(text: str | None, object_name: str) -> dict[str, str]:
+    if not text:
+        return {}
+    match = re.search(rf"export\s+const\s+{re.escape(object_name)}\s*=\s*{{(?P<body>.*?)\n}};", text, re.S)
+    if not match:
+        return {}
+    return {key: value for key, value in re.findall(r"(\w+):\s*['\"]([^'\"]+)['\"]", match.group("body"))}
+
+
+def inspect_browser_authority(root: Path) -> dict[str, Any]:
+    constants_path = root / "src" / "protocol" / "constants.js"
+    policy_path = root / "src" / "protocol" / "policy.js"
+    contract_path = root / "docs" / "BROWSER_HOOK_CONTRACT_V1.md"
+    constants_text = read_text_or_none(constants_path)
+    risk_values = js_const_object_values(constants_text, "RISK_CLASSES")
+    approval_values = js_const_object_values(constants_text, "APPROVAL_MODES")
+    risk_counts: Counter[str] = Counter()
+    approval_counts: Counter[str] = Counter()
+    for risk_key in re.findall(r"risk_class:\s*RISK_CLASSES\.(\w+)", constants_text or ""):
+        risk_counts[risk_values.get(risk_key, risk_key.lower())] += 1
+    for approval_key in re.findall(r"approval_mode:\s*APPROVAL_MODES\.(\w+)", constants_text or ""):
+        approval_counts[approval_values.get(approval_key, approval_key.lower())] += 1
+    return {
+        "sources": {
+            "constants": {"path": str(constants_path), "exists": constants_path.exists()},
+            "policy": {"path": str(policy_path), "exists": policy_path.exists()},
+            "contract": {"path": str(contract_path), "exists": contract_path.exists()},
+        },
+        "risk_classes": sorted(risk_values.values()),
+        "approval_modes": sorted(approval_values.values()),
+        "hook_count": sum(risk_counts.values()),
+        "risk_class_counts": dict(sorted(risk_counts.items())),
+        "approval_mode_counts": dict(sorted(approval_counts.items())),
+        "origin_scoped_hook_count": len(re.findall(r"requires_origin_scope:\s*true", constants_text or "")),
+        "sensitive_surface_policy_exists": "classifySensitiveSurface" in (read_text_or_none(policy_path) or ""),
+    }
+
+
+def inspect_public_output_authority(desktop: Path) -> dict[str, Any]:
+    swarm_root = desktop / "spark-swarm"
+    labs_root = desktop / "spark-domain-chip-labs"
+    sync_validation_path = swarm_root / "apps" / "api" / "src" / "collective" / "sync-validation.ts"
+    sync_text = read_text_or_none(sync_validation_path)
+    checks_match = re.search(r"REQUIRED_PUBLICATION_CHECKS\s*=\s*\[(?P<body>.*?)\]", sync_text or "", re.S)
+    required_checks = clean_ts_union(re.findall(r"['\"]([^'\"]+)['\"]", checks_match.group("body") if checks_match else ""))
+
+    swarm_files = {
+        name: {"path": str(swarm_root / rel_path), "exists": (swarm_root / rel_path).exists()}
+        for name, rel_path in SWARM_PUBLICATION_GOVERNANCE_FILES.items()
+    }
+    labs_files = {
+        name: {"path": str(labs_root / rel_path), "exists": (labs_root / rel_path).exists()}
+        for name, rel_path in LABS_CREATOR_SURFACE_FILES.items()
+    }
+    proposal_template = swarm_root / "templates" / "creator-system-network-proposal" / "creator-network-proposal-bundle.template.json"
+    readiness_template = swarm_root / "templates" / "creator-system-network-proposal" / "creator-system-launch-readiness.template.json"
+
+    return {
+        "authority": "publication_not_granted_by_local_artifacts",
+        "swarm_governance_files": swarm_files,
+        "labs_gate_files": labs_files,
+        "required_publication_workflow": regex_string(sync_text, r"REQUIRED_PUBLICATION_WORKFLOW\s*=\s*['\"]([^'\"]+)['\"]"),
+        "required_publication_checks": required_checks,
+        "creator_network_templates": {
+            "proposal_bundle": {"path": str(proposal_template), "exists": proposal_template.exists()},
+            "launch_readiness": {"path": str(readiness_template), "exists": readiness_template.exists()},
+        },
+        "non_override_rule": (
+            "Schema artifacts, local run artifacts, attestations, and ready-for-swarm packets do not grant "
+            "network publication authority without privacy, rollback, verified PR, publication approval, and signed-manifest gates."
+        ),
+    }
+
+
 def build_authority_view(desktop: Path, setup_summary: dict[str, Any]) -> dict[str, Any]:
     source_files = {
         "cli_access_policy": desktop / "spark-cli" / "src" / "spark_cli" / "sandbox" / "access.py",
         "cli_capabilities": desktop / "spark-cli" / "src" / "spark_cli" / "sandbox" / "capabilities.py",
         "telegram_access_policy": desktop / "spark-telegram-bot" / "src" / "accessPolicy.ts",
         "builder_aoc": desktop / "spark-intelligence-builder" / "src" / "spark_intelligence" / "self_awareness" / "operating_context.py",
+        "spawner_access_lanes": desktop / "spawner-ui" / "src" / "lib" / "server" / "access-execution-lanes.ts",
+        "spawner_access_actions": desktop / "spawner-ui" / "src" / "lib" / "server" / "access-execution-actions.ts",
+        "browser_constants": desktop / "spark-browser-extension" / "src" / "protocol" / "constants.js",
         "browser_policy": desktop / "spark-browser-extension" / "src" / "protocol" / "policy.js",
+        "swarm_sync_validation": desktop / "spark-swarm" / "apps" / "api" / "src" / "collective" / "sync-validation.ts",
     }
     observed_sources = {name: {"path": str(path), "exists": path.exists()} for name, path in source_files.items()}
 
-    default_access_level = None
-    access_file = source_files["cli_access_policy"]
-    if access_file.exists():
-        try:
-            match = re.search(r"DEFAULT_ACCESS_LEVEL\s*=\s*(\d+)", access_file.read_text(encoding="utf-8"))
-            default_access_level = int(match.group(1)) if match else None
-        except Exception:
-            default_access_level = None
+    cli_access = inspect_cli_access_source(source_files["cli_access_policy"])
+    cli_capability_policy = inspect_cli_capability_source(source_files["cli_capabilities"])
+    telegram_policy = inspect_telegram_access_source(source_files["telegram_access_policy"])
+    spawner_execution_policy = inspect_spawner_access_sources(desktop / "spawner-ui")
+    browser_authority = inspect_browser_authority(desktop / "spark-browser-extension")
+    public_output_authority = inspect_public_output_authority(desktop)
 
     return {
         "schema_version": AUTHORITY_VIEW_SCHEMA,
         "generated_at": utc_now(),
+        "authority": "observability_non_authoritative",
         "observed_sources": observed_sources,
-        "default_access_level_hint": default_access_level,
+        "default_access_level_hint": cli_access.get("default_access_level"),
         "telegram_profile_count": setup_summary.get("telegram_profile_count"),
         "primary_telegram_profile": setup_summary.get("primary_telegram_profile"),
-        "redaction": "policy file existence and non-secret constants only; env files and token values not read",
+        "cli_access": cli_access,
+        "cli_capability_policy": cli_capability_policy,
+        "telegram_access_policy": telegram_policy,
+        "spawner_execution_policy": spawner_execution_policy,
+        "browser_authority": browser_authority,
+        "public_output_authority": public_output_authority,
+        "guardrail_summary": {
+            "toxic_pair_count": cli_capability_policy.get("toxic_pair_count"),
+            "spawner_confirmation_gated_action_count": spawner_execution_policy.get("confirmation_gated_action_count"),
+            "browser_approval_required_hook_count": sum(
+                count
+                for mode, count in as_dict(browser_authority.get("approval_mode_counts")).items()
+                if mode not in {"not_required", "blocked"}
+            ),
+            "publication_checks_required": len(as_list(public_output_authority.get("required_publication_checks"))),
+        },
+        "redaction": (
+            "policy constants, safe command labels, source existence, and aggregate gate counts only; "
+            "env files, profile preference files, token values, chat ids, raw mission text, and browser content are not read"
+        ),
         "next_required_bridges": [
-            "Map CLI access level, sandbox lane, and capability toxic-pair checks into AOC authority view.",
-            "Map Telegram access policy into AuthorityViewV1 without copying token/profile secrets.",
-            "Map browser hook risk class and approval mode into AuthorityViewV1.",
-            "Map Swarm/Labs publication gates into public-output authority.",
+            "Promote this compiled AuthorityViewV1 into Builder AOC as evidence, not policy authority.",
+            "Point Telegram access/status replies at this view for compact drilldowns without raw ids.",
+            "Join authority checks to trace ids for high-agency actions, browser approvals, and publication gates.",
+            "Add runtime verdict exports so the view can distinguish configured policy from the currently active runner.",
         ],
     }
 

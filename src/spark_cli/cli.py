@@ -5555,6 +5555,63 @@ def cmd_os_capabilities(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_os_authority(args: argparse.Namespace) -> int:
+    desktop = Path(args.desktop).expanduser()
+    spark_home = Path(args.spark_home).expanduser()
+    registry_path = Path(args.registry).expanduser()
+    compiled = compile_system_map(desktop=desktop, spark_home=spark_home, registry_path=registry_path)
+    authority = compiled.get("authority_view") if isinstance(compiled, dict) else {}
+    authority = authority if isinstance(authority, dict) else {}
+    guardrails = authority.get("guardrail_summary") if isinstance(authority.get("guardrail_summary"), dict) else {}
+    cli_access = authority.get("cli_access") if isinstance(authority.get("cli_access"), dict) else {}
+    telegram = (
+        authority.get("telegram_access_policy")
+        if isinstance(authority.get("telegram_access_policy"), dict)
+        else {}
+    )
+    spawner = (
+        authority.get("spawner_execution_policy")
+        if isinstance(authority.get("spawner_execution_policy"), dict)
+        else {}
+    )
+    browser = authority.get("browser_authority") if isinstance(authority.get("browser_authority"), dict) else {}
+    public_output = (
+        authority.get("public_output_authority")
+        if isinstance(authority.get("public_output_authority"), dict)
+        else {}
+    )
+    payload = {
+        "schema_version": "spark.os_authority.summary.v0",
+        "generated_at": authority.get("generated_at"),
+        "default_access_level": authority.get("default_access_level_hint"),
+        "default_sandbox_lane": cli_access.get("default_sandbox_lane"),
+        "telegram_profiles": telegram.get("profiles") or [],
+        "telegram_allow_matrix": telegram.get("allow_matrix") or {},
+        "spawner_lanes": spawner.get("lane_ids") or [],
+        "spawner_run_policies": spawner.get("run_policies") or [],
+        "browser_risk_class_counts": browser.get("risk_class_counts") or {},
+        "browser_approval_mode_counts": browser.get("approval_mode_counts") or {},
+        "public_output_required_checks": public_output.get("required_publication_checks") or [],
+        "guardrail_summary": guardrails,
+        "authority": authority,
+        "redaction": authority.get("redaction"),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print("Spark OS authority")
+    print(f"- default access level: {payload['default_access_level']}")
+    print(f"- default sandbox lane: {payload['default_sandbox_lane']}")
+    print(f"- Telegram profiles: {len(payload['telegram_profiles'])}")
+    print(f"- Spawner lanes: {len(payload['spawner_lanes'])}")
+    print(f"- browser hooks: {browser.get('hook_count') or 0}")
+    print(f"- toxic capability pairs: {guardrails.get('toxic_pair_count') or 0}")
+    print(f"- publication checks required: {guardrails.get('publication_checks_required') or 0}")
+    print("Redaction: policy constants and aggregate gate counts only; secrets and raw content are not read.")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     payload = collect_status_payload()
     if args.json:
@@ -12621,6 +12678,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark support bundle", "use": "Create a local redacted support archive. Nothing uploads automatically." },
             { "command": "spark doctor --json", "use": "Structured diagnostics for agents and support." },
             { "command": "spark os compile", "use": "Compile a redacted local Spark OS system map, authority view, capability catalog, trace index, memory movement index, and gaps report." },
+            { "command": "spark os authority", "use": "Inspect redacted access, sandbox, browser approval, and publication authority contracts." },
             { "command": "spark os capabilities", "use": "Inspect redacted capability cards for Labs and Swarm surfaces." },
             { "command": "spark doctor llm \"<problem>\" --save-report", "use": "Ask the user's configured LLM for a redacted repair plan." },
             { "command": "spark autostart on --now", "use": "Turn on the Telegram agent now and every time this computer logs in." },
@@ -12643,6 +12701,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark onboard [bundle]", "use": "Resume setup or restart onboarding until the Telegram first-message bridge is confirmed." },
             { "command": "spark status [--json]", "use": "Run module healthchecks with repair hints." },
             { "command": "spark os compile [--json]", "use": "Write read-only Spark OS system-map, authority, capability, trace, memory movement, and gap reports under ~/.spark/state/system-map." },
+            { "command": "spark os authority [--json]", "use": "Inspect metadata-only authority levels, sandbox lanes, guarded actions, browser approvals, and publication gates." },
             { "command": "spark os capabilities [--json]", "use": "Inspect metadata-only capability cards and promotion blockers." },
             { "command": "spark doctor [--json]", "use": "Run diagnostic status output." },
             { "command": "spark doctor llm \"<problem>\"", "use": "Ask the configured LLM for a redacted repair plan." },
@@ -12955,6 +13014,12 @@ def build_parser() -> argparse.ArgumentParser:
     os_capabilities_parser.add_argument("--registry", default=str(LOCAL_REGISTRY_PATH), help="spark-cli registry.json path")
     os_capabilities_parser.add_argument("--json", action="store_true", help="Emit capability cards as JSON")
     os_capabilities_parser.set_defaults(func=cmd_os_capabilities)
+    os_authority_parser = os_subparsers.add_parser("authority", help="Inspect compiled Spark authority contracts")
+    os_authority_parser.add_argument("--desktop", default=str(Path.home() / "Desktop"), help="Desktop root containing Spark repos")
+    os_authority_parser.add_argument("--spark-home", default=str(SPARK_HOME), help="Spark home directory")
+    os_authority_parser.add_argument("--registry", default=str(LOCAL_REGISTRY_PATH), help="spark-cli registry.json path")
+    os_authority_parser.add_argument("--json", action="store_true", help="Emit authority contracts as JSON")
+    os_authority_parser.set_defaults(func=cmd_os_authority)
 
     status_parser = subparsers.add_parser("status", help="Run module healthchecks")
     status_parser.add_argument("--json", action="store_true")
