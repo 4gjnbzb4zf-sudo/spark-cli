@@ -455,7 +455,7 @@ def access_guide_payload(payload: dict[str, Any]) -> dict[str, Any]:
             whole_computer_message = "Level 5 is active. Spark should still prefer the safe workspace unless a task really needs the whole computer."
             whole_computer_action = "spark access status --level 5"
         elif level5_state == "active_for_services":
-            whole_computer_message = "Level 5 is active in Telegram and Mission Control. This separate terminal window is not in operator mode, so run whole-computer tasks from Spark."
+            whole_computer_message = "Level 5 is ready in Spark. Use Telegram or Mission Control for whole-computer tasks."
             whole_computer_action = "spark access status --level 5"
         elif level5_state == "session_only":
             whole_computer_message = "Level 5 is active only in this process. Run setup to persist it before relying on it after restart."
@@ -796,7 +796,7 @@ def access_lane_payload(
                 "user_message": (
                     "Whole-computer mode is enabled and persisted, but Spark should still prefer a sandbox."
                     if level5_activation_state == "active"
-                    else "Whole-computer mode is active in Telegram and Mission Control. This separate terminal window is not in operator mode, so run whole-computer tasks from Spark."
+                    else "Level 5 is ready in Spark. Use Telegram or Mission Control for whole-computer tasks."
                     if level5_activation_state == "active_for_services"
                     else "Whole-computer mode is active only for this process. Run setup to persist the guardrails."
                     if level5_activation_state == "session_only"
