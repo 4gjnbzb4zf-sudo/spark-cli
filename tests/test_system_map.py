@@ -176,11 +176,13 @@ class SparkSystemMapTests(unittest.TestCase):
             builder_release = spark_home / "modules" / "spark-intelligence-builder-release" / "source"
             builder_legacy = spark_home / "modules" / "spark-intelligence-builder" / "source"
             spawner_source = spark_home / "modules" / "spawner-ui" / "source"
+            spawner_audit_route = spawner_source / "src" / "routes" / "api" / "system" / "state-root"
             systems_repo = desktop / "spark-intelligence-systems"
             registry = root / "registry.json"
 
-            for path in [desktop, state, builder_release, builder_legacy, spawner_source / ".spawner", systems_repo]:
+            for path in [desktop, state, builder_release, builder_legacy, spawner_source / ".spawner", spawner_audit_route, systems_repo]:
                 path.mkdir(parents=True)
+            (spawner_audit_route / "+server.ts").write_text("spawnerStateRootAudit", encoding="utf-8")
             registry.write_text(
                 json.dumps(
                     {
@@ -219,6 +221,9 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertIn("spawner-module-local-state-root", item_ids)
         self.assertIn("spark-intelligence-systems-prototype-compiler", item_ids)
         self.assertIn("builder-release-vs-nonrelease-installed-source", cockpit_item_ids)
+        spawner_item = next(item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "spawner-module-local-state-root")
+        self.assertIn("State-root audit route exists", spawner_item["evidence"])
+        self.assertIn("/api/system/state-root", spawner_item["verification_command"])
         self.assertEqual(repo_board["summary"]["duplicate_truth_count"], len(item_ids))
         self.assertFalse(compiled["operating_cockpit"]["action_boundary"].startswith("Write"))
 

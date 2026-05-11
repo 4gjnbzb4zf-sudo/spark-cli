@@ -3376,7 +3376,13 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
     spawner_source = Path(spawner_source_raw) if spawner_source_raw else Path()
     spawner_state = spark_home / "state" / "spawner-ui"
     spawner_local_state = spawner_source / ".spawner" if spawner_source_raw else Path()
+    spawner_state_audit_route = spawner_source / "src" / "routes" / "api" / "system" / "state-root" / "+server.ts"
     if spawner_source_raw and spawner_local_state.exists():
+        audit_route_evidence = (
+            " State-root audit route exists."
+            if spawner_state_audit_route.exists()
+            else " State-root audit route is not present yet."
+        )
         items.append(
             duplicate_truth_item(
                 item_id="spawner-module-local-state-root",
@@ -3386,10 +3392,13 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
                 owner_repo="spawner-ui",
                 canonical_path=str(spawner_state),
                 duplicate_path=str(spawner_local_state),
-                evidence="Current compiler and proof artifacts use spark-home state while module-local Spawner state also exists.",
+                evidence=(
+                    "Current compiler and proof artifacts use spark-home state while module-local Spawner state also exists."
+                    + audit_route_evidence
+                ),
                 risk="Old mission files can be mistaken for current mission truth.",
-                next_safe_action="Audit current Spawner source for .spawner reads/writes; add warnings before any archive.",
-                verification_command="rg -n \"\\\\.spawner|SPAWNER_STATE|stateDir\" src scripts",
+                next_safe_action="Use the Spawner state-root audit route, then curate remaining dirty-route .spawner wording or paths before archive.",
+                verification_command="Invoke-WebRequest http://127.0.0.1:3333/api/system/state-root; rg -n \"\\\\.spawner|SPAWNER_STATE|stateDir\" src scripts",
                 rollback="Leave module-local state untouched and read-only until current runtime no longer reads or writes it.",
             )
         )
