@@ -14,13 +14,19 @@ from spark_cli.system_map import (
     build_authority_view,
     build_capability_catalog,
     build_memory_movement_index,
+    build_repo_board,
+    build_trace_current_health,
+    build_trace_repair_queue,
+    build_voice_surface_view,
     collect_repo_metadata,
     count_safe_jsonl,
     inspect_builder_event_samples,
     inspect_builder_trace_health,
     inspect_builder_trace_groups,
+    inspect_spawner_authority_verdicts,
     inspect_spawner_prd_auto_trace,
     inspect_telegram_final_answer_gate,
+    parse_branch_status,
     safe_builder_event_value,
     summarize_pids,
     summarize_setup,
@@ -60,6 +66,7 @@ class SparkSystemMapTests(unittest.TestCase):
                     [
                         json.dumps({"event_type": "route_selected", "summary": "private text"}),
                         json.dumps({"event_type": "route_selected", "token": "secret"}),
+                        json.dumps({"event_type": "route_selected", "chat_id": "123456"}),
                         "{not-json",
                     ]
                 ),
@@ -68,13 +75,261 @@ class SparkSystemMapTests(unittest.TestCase):
             summary = count_safe_jsonl(path)
 
         encoded = json.dumps(summary)
-        self.assertEqual(summary["line_count"], 3)
-        self.assertEqual(summary["parsed_count"], 2)
+        self.assertEqual(summary["line_count"], 4)
+        self.assertEqual(summary["parsed_count"], 3)
         self.assertEqual(summary["parse_errors"], 1)
-        self.assertEqual(summary["safe_value_counts"]["event_type"]["route_selected"], 2)
+        self.assertEqual(summary["safe_value_counts"]["event_type"]["route_selected"], 3)
+        self.assertGreaterEqual(summary["redacted_key_name_count"], 2)
         self.assertIn("summary", summary["top_keys"])
+        self.assertNotIn("chat_id", summary["top_keys"])
+        self.assertNotIn("token", summary["top_keys"])
         self.assertNotIn("private text", encoded)
         self.assertNotIn("secret", encoded)
+
+    def test_repo_board_and_voice_surface_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "spark-cli"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            voice = root / "spark-voice-comms"
+            builder = root / "spark-intelligence-builder"
+            telegram = root / "spark-telegram-bot"
+            (voice / "src" / "voice_comms_chip").mkdir(parents=True)
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram").mkdir(parents=True)
+            (telegram / "src").mkdir(parents=True)
+            (voice / "src" / "voice_comms_chip" / "spark_hook.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\n",
+                encoding="utf-8",
+            )
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram" / "runtime.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\nvoice_transcript_preview\n",
+                encoding="utf-8",
+            )
+            (telegram / "src" / "telegramVoiceBridge.ts").write_text("voice bridge", encoding="utf-8")
+            board = build_repo_board(
+                {
+                    "registry": {"modules": {"spark-cli": {}}},
+                    "installed_modules": {},
+                    "discovered_repos": [
+                        {
+                            "name": "spark-cli",
+                            "path": str(repo),
+                            "spark_toml": {"module_name": "spark-cli"},
+                            "contract_files": ["spark.toml"],
+                        }
+                    ],
+                }
+            )
+            view = build_voice_surface_view(
+                {
+                    "installed_modules": {},
+                    "discovered_repos": [
+                        {"name": "spark-voice-comms", "path": str(voice)},
+                        {"name": "spark-intelligence-builder", "path": str(builder)},
+                        {"name": "spark-telegram-bot", "path": str(telegram)},
+                    ],
+                }
+            )
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram" / "runtime.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\nvoice_transcript_present\n",
+                encoding="utf-8",
+            )
+            cleaned_view = build_voice_surface_view(
+                {
+                    "installed_modules": {},
+                    "discovered_repos": [
+                        {"name": "spark-voice-comms", "path": str(voice)},
+                        {"name": "spark-intelligence-builder", "path": str(builder)},
+                        {"name": "spark-telegram-bot", "path": str(telegram)},
+                    ],
+                }
+            )
+        encoded = json.dumps({"board": board, "voice": view})
+
+        self.assertEqual(board["schema_version"], "spark.repo_board.compiled.v0")
+        self.assertEqual(board["repos"][0]["risk_class"], "critical")
+        self.assertEqual(view["schema_version"], "spark.voice_surface_view.compiled.v0")
+        self.assertEqual(view["mode"], "disabled")
+        self.assertEqual(view["source_capability"]["source_mode"], "duplex")
+        self.assertTrue(view["source_capability"]["telegram_bridge_present"])
+        self.assertEqual(view["trace"]["trace_evidence"], "source_present_not_proven")
+        self.assertTrue(view["privacy_findings"]["builder_transcript_preview_present"])
+        self.assertFalse(cleaned_view["privacy_findings"]["builder_transcript_preview_present"])
+        self.assertNotIn(
+            "Builder retains raw voice transcript preview in private trace fields",
+            cleaned_view["blockers"],
+        )
+        self.assertFalse(view["memory_policy"]["raw_audio_exported_to_os_artifacts"])
+        self.assertIn("not installed", " ".join(view["blockers"]))
+        self.assertNotIn("README.md", encoded)
+        self.assertNotIn("transcript body", encoded.lower())
+
+    def test_voice_surface_uses_sanitized_runtime_state_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spark_home = root / ".spark"
+            voice = root / "spark-voice-comms"
+            builder = root / "spark-intelligence-builder"
+            telegram = root / "spark-telegram-bot"
+            (spark_home / "state" / "spark-voice-comms").mkdir(parents=True)
+            (voice / "src" / "voice_comms_chip").mkdir(parents=True)
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram").mkdir(parents=True)
+            (telegram / "src").mkdir(parents=True)
+            (voice / "src" / "voice_comms_chip" / "spark_hook.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\n",
+                encoding="utf-8",
+            )
+            (builder / "src" / "spark_intelligence" / "adapters" / "telegram" / "runtime.py").write_text(
+                "voice.status\nvoice.transcribe\nvoice.speak\n",
+                encoding="utf-8",
+            )
+            (telegram / "src" / "telegramVoiceBridge.ts").write_text("voice bridge", encoding="utf-8")
+            (spark_home / "state" / "spark-voice-comms" / "voice-runtime-state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "spark.voice_runtime_state.v1",
+                        "stt": {
+                            "provider_id": "local_faster_whisper",
+                            "provider_kind": "local",
+                            "mode": "local",
+                            "ready": True,
+                            "model": "tiny",
+                        },
+                        "tts": {
+                            "provider_id": "none",
+                            "mode": "hosted",
+                            "ready": False,
+                            "voice_name": "spark_core",
+                        },
+                        "telegram_delivery": {"ready": False, "last_send_voice_status": "unknown"},
+                        "claim_levels": {
+                            "configured": True,
+                            "synthesis_ready": False,
+                            "delivery_ready": False,
+                            "conversation_ready": False,
+                        },
+                        "source_ledger": ["voice.status", "voice_profile"],
+                        "transcript_text": "private transcript body",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            view = build_voice_surface_view(
+                {
+                    "source_roots": {"spark_home": str(spark_home)},
+                    "installed_modules": {"spark-voice-comms": {"path": str(voice)}},
+                    "discovered_repos": [
+                        {"name": "spark-voice-comms", "path": str(voice)},
+                        {"name": "spark-intelligence-builder", "path": str(builder)},
+                        {"name": "spark-telegram-bot", "path": str(telegram)},
+                    ],
+                }
+            )
+
+        encoded = json.dumps(view)
+        joined_blockers = " ".join(view["blockers"])
+        self.assertEqual(view["mode"], "ingress")
+        self.assertTrue(view["source_capability"]["installed_in_spark_state"])
+        self.assertTrue(view["provider"]["configured"])
+        self.assertEqual(view["provider"]["kind"], "local")
+        self.assertTrue(view["provider"]["stt_ready"])
+        self.assertFalse(view["provider"]["tts_ready"])
+        self.assertEqual(view["profile"]["voice_style_ref"], "spark_core")
+        self.assertTrue(view["trace"]["voice_events_supported"])
+        self.assertEqual(view["trace"]["trace_evidence"], "runtime_state_export_present_delivery_unproven")
+        self.assertNotIn("not installed", joined_blockers)
+        self.assertNotIn("runtime status is not exported", joined_blockers)
+        self.assertIn("voice synthesis is not ready", joined_blockers)
+        self.assertIn("voice Telegram delivery is not proven", joined_blockers)
+        self.assertIn("voice final-answer join evidence is not compiled", joined_blockers)
+        self.assertNotIn("private transcript body", encoded)
+
+    def test_parse_branch_status_handles_unborn_branch(self) -> None:
+        parsed = parse_branch_status("## No commits yet on master")
+
+        self.assertEqual(parsed["branch"], "master")
+        self.assertIsNone(parsed["upstream"])
+        self.assertEqual(parsed["ahead"], 0)
+        self.assertEqual(parsed["behind"], 0)
+
+    def test_trace_repair_queue_is_ranked_and_metadata_only(self) -> None:
+        queue = build_trace_repair_queue(
+            {
+                "builder_trace_health": {
+                    "high_severity_open_count": 2,
+                    "recent_windows": [
+                        {"window": "24h", "row_count": 3, "missing_trace_ref_count": 1},
+                    ],
+                    "missing_trace_ref_sources": {
+                        "rows": [
+                            {
+                                "component": "memory_orchestrator",
+                                "event_type": "memory_read_requested",
+                                "status": "recorded",
+                                "severity": "medium",
+                                "target_surface": "spark_intelligence_builder",
+                                "evidence_lane": "realworld_validated",
+                                "event_count": 12,
+                                "summary": "private user wording",
+                            }
+                        ]
+                    },
+                },
+                "telegram_final_answer_gate_samples": {
+                    "exists": True,
+                    "parsed_count": 3,
+                    "trace_join": {"status": "missing_join_key"},
+                    "top_keys": {"chat_id": 3},
+                },
+                "spawner_prd_auto_trace_samples": {
+                    "join_keys": {"request_id_count": 5, "derived_trace_ref_count": 4},
+                    "builder_request_overlap": {"matched_builder_request_id_count": 0},
+                    "builder_trace_ref_overlap": {"matched_builder_trace_ref_count": 0},
+                },
+            }
+        )
+        encoded = json.dumps(queue)
+
+        self.assertEqual(queue[0]["id"], "spawner-builder-missing-shared-trace")
+        self.assertEqual(queue[0]["priority"], "critical")
+        self.assertEqual(queue[1]["id"], "telegram-final-answer-missing-join-key")
+        self.assertEqual(queue[2]["owner_repo"], "spark-intelligence-builder")
+        self.assertEqual(queue[2]["missing_field"], "trace_ref")
+        self.assertNotIn("private user wording", encoded)
+        self.assertNotIn("chat_id", encoded)
+
+    def test_trace_repair_queue_marks_clean_recent_window_as_historical_backlog(self) -> None:
+        trace_index = {
+            "builder_trace_health": {
+                "missing_trace_ref_count": 50,
+                "recent_windows": [
+                    {"window": "1h", "row_count": 0, "missing_trace_ref_count": 0, "missing_trace_ref_ratio": 0.0},
+                    {"window": "24h", "row_count": 3, "missing_trace_ref_count": 0, "missing_trace_ref_ratio": 0.0},
+                    {"window": "7d", "row_count": 100, "missing_trace_ref_count": 50, "missing_trace_ref_ratio": 0.5},
+                ],
+                "missing_trace_ref_sources": {
+                    "rows": [
+                        {
+                            "component": "memory_orchestrator",
+                            "event_type": "memory_read_requested",
+                            "event_count": 50,
+                        }
+                    ]
+                },
+            }
+        }
+        health = build_trace_current_health(trace_index)
+        trace_index["trace_current_health"] = health
+        queue = build_trace_repair_queue(trace_index)
+
+        self.assertEqual(health["status"], "current_clean_historical_backlog")
+        self.assertEqual(health["window"], "24h")
+        self.assertEqual(queue[0]["priority"], "medium")
+        self.assertEqual(queue[0]["temporal_scope"], "historical_backlog")
+        self.assertEqual(queue[0]["current_window_missing_trace_ref_count"], 0)
+        self.assertIn("historical", queue[0]["rank_reason"])
 
     def test_cross_system_trace_samples_keep_join_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +386,26 @@ class SparkSystemMapTests(unittest.TestCase):
                                 "timeoutMs": 1000,
                             }
                         ),
+                        json.dumps(
+                            {
+                                "ts": "2026-05-10T13:00:03Z",
+                                "event": "authority_verdict_evaluated",
+                                "requestId": "req-1",
+                                "traceRef": "trace:spawner-prd:mission-1",
+                                "authorityVerdict": {
+                                    "schema_version": "spark.authority_verdict.v1",
+                                    "traceRef": "trace:spawner-prd:mission-1",
+                                    "actionFamily": "mission_execution",
+                                    "sourcePolicy": "spawner_policy",
+                                    "verdict": "allowed",
+                                    "confirmationRequired": False,
+                                    "scope": "local_spawner_prd_auto_analysis",
+                                    "sourceRepo": "spawner-ui",
+                                    "reasonCode": "auto_provider_codex_started",
+                                    "prompt": "private prompt should stay out",
+                                },
+                            }
+                        ),
                     ]
                 ),
                 encoding="utf-8",
@@ -138,24 +413,33 @@ class SparkSystemMapTests(unittest.TestCase):
 
             final_summary = inspect_telegram_final_answer_gate(final_gate)
             spawner_summary = inspect_spawner_prd_auto_trace(spawner_trace, builder_home=builder_home)
+            authority_summary = inspect_spawner_authority_verdicts(spawner_trace)
 
-        encoded = json.dumps({"final": final_summary, "spawner": spawner_summary})
+        encoded = json.dumps({"final": final_summary, "spawner": spawner_summary, "authority": authority_summary})
         self.assertEqual(final_summary["sample_count"], 1)
         self.assertEqual(final_summary["samples"][0]["outcome"], "delivered")
         self.assertEqual(final_summary["trace_join"]["status"], "missing_join_key")
+        self.assertGreaterEqual(final_summary["redacted_key_name_count"], 2)
+        self.assertNotIn("chat_id", final_summary["top_keys"])
+        self.assertNotIn("user_id", final_summary["top_keys"])
         self.assertEqual(spawner_summary["join_keys"]["request_id_count"], 2)
         self.assertEqual(spawner_summary["join_keys"]["mission_id_count"], 1)
-        self.assertEqual(spawner_summary["join_keys"]["trace_ref_count"], 0)
+        self.assertEqual(spawner_summary["join_keys"]["trace_ref_count"], 1)
         self.assertEqual(spawner_summary["join_keys"]["derived_trace_ref_count"], 1)
         self.assertEqual(spawner_summary["derived_trace_contract"]["status"], "derived_available")
         self.assertEqual(spawner_summary["builder_request_overlap"]["matched_builder_request_id_count"], 1)
         self.assertEqual(spawner_summary["builder_trace_ref_overlap"]["matched_builder_trace_ref_count"], 1)
         self.assertEqual(spawner_summary["samples"][0]["requestId"], "req-1")
+        self.assertEqual(authority_summary["verdict_count"], 1)
+        self.assertEqual(authority_summary["verdict_counts"]["allowed"], 1)
+        self.assertEqual(authority_summary["items"][0]["action_family"], "mission_execution")
+        self.assertTrue(str(authority_summary["items"][0]["request_id"]).startswith("request_id:redacted:"))
         self.assertNotIn("private answer", encoded)
         self.assertNotIn("token=secret", encoded)
         self.assertNotIn("telegram:123456789", encoded)
         self.assertNotIn("C:/private/path", encoded)
         self.assertNotIn("private project", encoded)
+        self.assertNotIn("private prompt should stay out", encoded)
 
     def test_process_summary_omits_raw_command_args(self) -> None:
         summary = summarize_pids(
@@ -207,9 +491,24 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(index["safe_status_export"]["status"]["movement_counts"]["accepted"], 3)
         self.assertEqual(index["memory_kb_artifacts"]["lane_counts"]["current_state"]["file_count"], 1)
         self.assertGreater(index["safe_status_export"]["raw_hint_key_count"], 0)
+        self.assertEqual(index["memory_review_queue"]["schema_version"], "spark.memory_review_queue.v1")
+        self.assertGreater(index["memory_review_queue"]["counts"]["item_count"], 0)
+        self.assertTrue(all(item.get("operator_paths") for item in index["memory_review_queue"]["items"]))
+        self.assertTrue(
+            any(item["reason_code"] == "raw_memory_hint_keys_omitted" for item in index["memory_review_queue"]["items"])
+        )
+        redaction_item = next(
+            item
+            for item in index["memory_review_queue"]["items"]
+            if item["reason_code"] == "raw_memory_hint_keys_omitted"
+        )
+        self.assertEqual(redaction_item["operator_paths"]["cockpit_action"], "read_only_observe_and_route")
+        self.assertEqual(redaction_item["operator_paths"]["purge_or_decay_path"], "compiler_omission_only_no_memory_mutation")
         self.assertNotIn("My private fact", encoded)
         self.assertNotIn("telegram-token-value", encoded)
         self.assertNotIn("human-telegram-123-profile-preferred-name", encoded)
+        self.assertNotIn("raw_text", encoded)
+        self.assertNotIn("subject", index["safe_status_export"]["omitted_top_level_keys"])
 
     def test_capability_catalog_projects_labs_and_swarm_surfaces_without_bodies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,6 +598,15 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(swarm_surface["collective_artifacts"]["promotion_packet_count"], 1)
         self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["status"], "local-artifacts")
         self.assertEqual(cards_by_id["specialization-path:spark-swarm"]["status"], "local-artifacts")
+        self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["trust_status"], "untrusted")
+        self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["proof_state"], "artifact_present_unverified")
+        self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["trust_scope"], "none")
+        self.assertIn("privacy_review_verdict", cards_by_id["creator-system:spark-domain-chip-labs"]["missing_proofs"])
+        self.assertFalse(cards_by_id["creator-system:spark-domain-chip-labs"]["compiled_proofs"]["publication_approval_present"])
+        self.assertEqual(cards_by_id["specialization-path:spark-swarm"]["trust_status"], "untrusted")
+        self.assertEqual(cards_by_id["specialization-path:spark-swarm"]["proof_state"], "artifact_present_unverified")
+        self.assertIn("benchmark_pass_fail_verdict", cards_by_id["specialization-path:spark-swarm"]["missing_proofs"])
+        self.assertIn("Schema, manifest", cards_by_id["specialization-path:spark-swarm"]["trust_rule"])
         self.assertIn("Network publication approval", cards_by_id["creator-system:spark-domain-chip-labs"]["blockers"][2])
         self.assertNotIn("schema body should stay out", encoded)
         self.assertNotIn("run body should stay out", encoded)
@@ -822,6 +1130,9 @@ routes = []
             self.assertTrue((out / "capability-catalog.json").exists())
             self.assertTrue((out / "trace-index.json").exists())
             self.assertTrue((out / "memory-movement-index.json").exists())
+            self.assertTrue((out / "repo-board.json").exists())
+            self.assertTrue((out / "voice-surface-view.json").exists())
+            self.assertTrue((out / "operating-cockpit.json").exists())
             self.assertNotIn("telegram.bot_token", output_text)
             self.assertNotIn("webhook_url", output_text)
 

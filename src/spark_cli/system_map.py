@@ -19,6 +19,10 @@ CAPABILITY_CATALOG_SCHEMA = "spark.capability_catalog.compiled.v0"
 CAPABILITY_CARD_SCHEMA = "spark.capability_card.v1"
 TRACE_INDEX_SCHEMA = "spark.trace_index.compiled.v0"
 MEMORY_MOVEMENT_INDEX_SCHEMA = "spark.memory_movement_index.compiled.v0"
+MEMORY_REVIEW_QUEUE_SCHEMA = "spark.memory_review_queue.v1"
+REPO_BOARD_SCHEMA = "spark.repo_board.compiled.v0"
+VOICE_SURFACE_SCHEMA = "spark.voice_surface_view.compiled.v0"
+OPERATING_COCKPIT_SCHEMA = "spark.operating_cockpit.compiled.v0"
 
 SPARK_REPO_NAME_HINTS = ("spark", "domain-chip", "spawner-ui")
 
@@ -65,6 +69,90 @@ SAFE_JSONL_COUNT_KEYS = (
     "route",
     "surface",
 )
+
+SENSITIVE_KEY_NAME_HINTS = (
+    "api_key",
+    "authorization",
+    "bot_token",
+    "chat_id",
+    "cookie",
+    "secret",
+    "token",
+    "transcript",
+    "user_id",
+)
+
+OWNER_SURFACES = {
+    "spark-cli": "installer, compiler, authority, browser-use, release metadata",
+    "spark-intelligence-builder": "AOC, black box, memory orchestration, operating-panel read model",
+    "spark-telegram-bot": "Telegram field console",
+    "spawner-ui": "mission execution and mission trace",
+    "spark-command-center": "Spark Operating Cockpit shell",
+    "spark-memory-quality-dashboard": "Cockpit memory review source module",
+    "domain-chip-memory": "durable memory substrate and movement discipline",
+    "spark-voice-comms": "voice ingress/egress surface",
+    "spark-domain-chip-labs": "capability lab, benchmark packets, review gates",
+    "spark-swarm": "specialization paths and publication governance",
+    "spark-skill-graphs": "specialist library and routing substrate",
+    "spark-intelligence-systems": "doctrine, runbook, prototype read model",
+}
+
+CORE_REPOS = set(OWNER_SURFACES)
+
+TRACE_REPAIR_COMPONENT_OWNERS = {
+    "agent_operating_context": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "Agent Operating Context event emission",
+    },
+    "attachment_snapshot": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "attachment snapshot event emission",
+    },
+    "attachments_cli": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "attachments CLI event emission",
+    },
+    "browser_cli": {
+        "owner_repo": "spark-cli",
+        "source_module": "browser-use CLI event emission",
+    },
+    "config_manager": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "config manager event emission",
+    },
+    "direct_provider": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "direct provider bridge event emission",
+    },
+    "doctor_cli": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "doctor CLI event emission",
+    },
+    "memory_doctor": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "memory doctor event emission",
+    },
+    "memory_orchestrator": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "memory orchestrator event emission",
+    },
+    "researcher_bridge": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "researcher bridge event emission",
+    },
+    "stop_ship_checks": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "stop-ship check event emission",
+    },
+    "swarm_bridge": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "Swarm bridge event emission",
+    },
+    "telegram_runtime": {
+        "owner_repo": "spark-telegram-bot",
+        "source_module": "Telegram runtime event emission",
+    },
+}
 
 SAFE_TELEGRAM_FINAL_ANSWER_FIELDS = (
     "ts",
@@ -309,6 +397,79 @@ def git_summary(path: Path) -> dict[str, Any]:
     return {"available": True, "head_short": result.stdout.strip() if result.returncode == 0 else None}
 
 
+def run_git(path: Path, args: list[str], timeout: int = 3) -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return 1, ""
+    return result.returncode, result.stdout.strip()
+
+
+def parse_branch_status(line: str) -> dict[str, Any]:
+    branch = ""
+    upstream = None
+    ahead = 0
+    behind = 0
+    if line.startswith("## "):
+        body = line[3:]
+        no_commit_prefix = "No commits yet on "
+        if body.startswith(no_commit_prefix):
+            branch = body[len(no_commit_prefix) :].split(" ", 1)[0]
+        elif "..." in body:
+            branch, rest = body.split("...", 1)
+            upstream = rest.split(" ", 1)[0] if rest else None
+        else:
+            branch = body.split(" ", 1)[0]
+        ahead_match = re.search(r"ahead\s+(\d+)", body)
+        behind_match = re.search(r"behind\s+(\d+)", body)
+        ahead = int(ahead_match.group(1)) if ahead_match else 0
+        behind = int(behind_match.group(1)) if behind_match else 0
+    return {"branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind}
+
+
+def git_board_status(path: Path) -> dict[str, Any]:
+    if not (path / ".git").exists():
+        return {
+            "available": False,
+            "branch": None,
+            "upstream": None,
+            "ahead": 0,
+            "behind": 0,
+            "dirty_tracked_count": 0,
+            "untracked_count": 0,
+            "last_commit": None,
+        }
+
+    code, status = run_git(path, ["status", "--short", "--branch"])
+    lines = status.splitlines() if code == 0 and status else []
+    branch_status = parse_branch_status(lines[0] if lines else "")
+    dirty_tracked_count = 0
+    untracked_count = 0
+    for line in lines[1:]:
+        if line.startswith("??"):
+            untracked_count += 1
+        elif line.strip():
+            dirty_tracked_count += 1
+
+    code, commit = run_git(path, ["log", "-1", "--format=%h %cI"])
+    return {
+        "available": True,
+        "branch": branch_status["branch"] or None,
+        "upstream": branch_status["upstream"],
+        "ahead": branch_status["ahead"],
+        "behind": branch_status["behind"],
+        "dirty_tracked_count": dirty_tracked_count,
+        "untracked_count": untracked_count,
+        "last_commit": commit if code == 0 and commit else None,
+    }
+
+
 def collect_repo_metadata(path: Path) -> dict[str, Any]:
     record: dict[str, Any] = {"name": path.name, "path": str(path), "exists": path.exists()}
     if not path.exists():
@@ -498,7 +659,7 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
     if not path.exists():
         return out
 
-    line_count = parsed_count = parse_errors = 0
+    line_count = parsed_count = parse_errors = redacted_key_name_count = 0
     key_counts: Counter[str] = Counter()
     value_counts: dict[str, Counter[str]] = {key: Counter() for key in SAFE_JSONL_COUNT_KEYS}
     try:
@@ -516,7 +677,11 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
                 if not isinstance(payload, dict):
                     continue
                 for key, value in payload.items():
-                    key_counts[str(key)] += 1
+                    key_name = str(key)
+                    if any(hint in key_name.lower() for hint in SENSITIVE_KEY_NAME_HINTS):
+                        redacted_key_name_count += 1
+                        continue
+                    key_counts[key_name] += 1
                     if key in value_counts and isinstance(value, (str, int, float, bool)) and value is not None:
                         value_counts[key][str(value)[:80]] += 1
     except Exception as exc:
@@ -526,6 +691,7 @@ def count_safe_jsonl(path: Path) -> dict[str, Any]:
     out["line_count"] = line_count
     out["parsed_count"] = parsed_count
     out["parse_errors"] = parse_errors
+    out["redacted_key_name_count"] = redacted_key_name_count
     out["top_keys"] = dict(key_counts.most_common(30))
     out["safe_value_counts"] = {key: dict(counter.most_common(30)) for key, counter in value_counts.items() if counter}
     return out
@@ -550,7 +716,7 @@ def inspect_safe_jsonl_samples(
         return out
 
     identifier_fields = identifier_fields or {}
-    line_count = parsed_count = parse_errors = 0
+    line_count = parsed_count = parse_errors = redacted_key_name_count = 0
     key_counts: Counter[str] = Counter()
     samples: deque[dict[str, Any]] = deque(maxlen=max(0, min(int(limit), 100)))
     try:
@@ -568,7 +734,11 @@ def inspect_safe_jsonl_samples(
                 if not isinstance(payload, dict):
                     continue
                 for key in payload:
-                    key_counts[str(key)] += 1
+                    key_name = str(key)
+                    if any(hint in key_name.lower() for hint in SENSITIVE_KEY_NAME_HINTS):
+                        redacted_key_name_count += 1
+                        continue
+                    key_counts[key_name] += 1
                 sample: dict[str, Any] = {}
                 for field in safe_fields:
                     if field in payload:
@@ -586,6 +756,7 @@ def inspect_safe_jsonl_samples(
     out["line_count"] = line_count
     out["parsed_count"] = parsed_count
     out["parse_errors"] = parse_errors
+    out["redacted_key_name_count"] = redacted_key_name_count
     out["top_keys"] = dict(key_counts.most_common(30))
     out["samples"] = list(samples)
     out["sample_count"] = len(samples)
@@ -776,6 +947,80 @@ def inspect_builder_trace_ref_overlap(builder_home: Path, trace_refs: set[str]) 
     return out
 
 
+def inspect_spawner_authority_verdicts(path: Path) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source": "spawner_prd_auto_trace",
+        "path": str(path),
+        "exists": path.exists(),
+        "schema_version": "spark.authority_verdict_index.v0",
+        "redaction": "authority verdict metadata only; prompts, mission bodies, provider output, and raw request identifiers omitted",
+        "verdict_count": 0,
+        "verdict_counts": {},
+        "action_family_counts": {},
+        "source_policy_counts": {},
+        "items": [],
+    }
+    if not path.exists():
+        return out
+
+    verdict_counts: Counter[str] = Counter()
+    action_family_counts: Counter[str] = Counter()
+    source_policy_counts: Counter[str] = Counter()
+    items: deque[dict[str, Any]] = deque(maxlen=40)
+    parsed_count = parse_errors = 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    parse_errors += 1
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                parsed_count += 1
+                if payload.get("event") != "authority_verdict_evaluated":
+                    continue
+                verdict = as_dict(payload.get("authorityVerdict"))
+                verdict_name = str(verdict.get("verdict") or "unknown")
+                action_family = str(verdict.get("actionFamily") or "unknown")
+                source_policy = str(verdict.get("sourcePolicy") or "unknown")
+                verdict_counts[verdict_name] += 1
+                action_family_counts[action_family] += 1
+                source_policy_counts[source_policy] += 1
+                trace_ref = verdict.get("traceRef") or payload.get("traceRef") or payload.get("trace_ref")
+                request_id = payload.get("requestId")
+                items.append(
+                    {
+                        "schema_version": str(verdict.get("schema_version") or "spark.authority_verdict.v1"),
+                        "ts": safe_jsonl_sample_value("ts", payload.get("ts"), identifier_fields={}),
+                        "request_id": redacted_identifier("request_id", request_id) if isinstance(request_id, str) else None,
+                        "trace_ref": redacted_identifier("trace_ref", trace_ref) if isinstance(trace_ref, str) else None,
+                        "action_family": action_family,
+                        "source_policy": source_policy,
+                        "verdict": verdict_name,
+                        "confirmation_required": bool(verdict.get("confirmationRequired")),
+                        "scope": safe_short_string(str(verdict.get("scope") or "unknown"), limit=120),
+                        "source_repo": safe_short_string(str(verdict.get("sourceRepo") or "unknown"), limit=80),
+                        "reason_code": safe_short_string(str(verdict.get("reasonCode") or "unknown"), limit=120),
+                    }
+                )
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    out["parsed_count"] = parsed_count
+    out["parse_errors"] = parse_errors
+    out["verdict_count"] = sum(verdict_counts.values())
+    out["verdict_counts"] = dict(verdict_counts.most_common(20))
+    out["action_family_counts"] = dict(action_family_counts.most_common(20))
+    out["source_policy_counts"] = dict(source_policy_counts.most_common(20))
+    out["items"] = list(items)
+    return out
+
+
 def inspect_json_shape(path: Path) -> dict[str, Any]:
     data, error = read_json(path)
     out: dict[str, Any] = {"path": str(path), "exists": path.exists(), "redaction": "shape only; values omitted"}
@@ -898,7 +1143,9 @@ def read_memory_movement_status_export(builder_home: Path) -> dict[str, Any]:
         if key in data:
             allowed[key] = safe_memory_status_value(data[key])
     out["status"] = allowed
-    out["omitted_top_level_keys"] = sorted(str(key) for key in data.keys() if key not in SAFE_MEMORY_STATUS_KEYS)[:80]
+    out["omitted_top_level_keys"] = sorted(
+        str(key) for key in data.keys() if key not in SAFE_MEMORY_STATUS_KEYS and not key_has_raw_memory_hint(key)
+    )[:80]
     out["raw_hint_key_count"] = count_raw_memory_hint_keys(data)
     return out
 
@@ -1107,6 +1354,32 @@ def capability_card_status_from_specialization(surface: dict[str, Any]) -> str:
     return "seen"
 
 
+def capability_proof_state(status: str) -> str:
+    if status == "schema-shaped":
+        return "schema_only"
+    if status == "local-artifacts":
+        return "artifact_present_unverified"
+    return "proof_incomplete"
+
+
+def capability_trust_fields(
+    *,
+    status: str,
+    compiled_proofs: dict[str, Any],
+    trust_basis: list[str],
+    missing_proofs: list[str],
+) -> dict[str, Any]:
+    return {
+        "trust_status": "untrusted",
+        "proof_state": capability_proof_state(status),
+        "trust_scope": "none",
+        "trust_basis": trust_basis,
+        "compiled_proofs": compiled_proofs,
+        "missing_proofs": missing_proofs,
+        "trust_rule": "Schema, manifest, conformance, or local artifact presence never makes a capability trusted.",
+    }
+
+
 def build_capability_cards(
     creator_system_surfaces: list[dict[str, Any]],
     specialization_path_surfaces: list[dict[str, Any]],
@@ -1119,6 +1392,42 @@ def build_capability_cards(
         artifacts = as_dict(surface.get("creator_run_artifacts"))
         review_sources = as_dict(surface.get("review_and_release_sources"))
         artifact_counts = as_dict(artifacts.get("artifact_presence_counts"))
+        status = capability_card_status_from_labs(surface)
+        creator_run_count = int(artifacts.get("run_count") or 0)
+        schema_count = int(schema_inventory.get("schema_count") or 0)
+        benchmark_manifest_count = int(artifact_counts.get("benchmark_manifest") or 0)
+        review_source_count = bool_count(review_sources)
+        trust = capability_trust_fields(
+            status=status,
+            compiled_proofs={
+                "schema_present": schema_count > 0,
+                "local_artifacts_present": creator_run_count > 0,
+                "benchmark_manifest_present": benchmark_manifest_count > 0,
+                "review_sources_present": review_source_count > 0,
+                "trace_refs_present": False,
+                "rollback_refs_present": False,
+                "privacy_review_verdict_present": False,
+                "publication_approval_present": False,
+            },
+            trust_basis=[
+                basis
+                for basis, present in (
+                    ("schema_present", schema_count > 0),
+                    ("local_artifacts_present", creator_run_count > 0),
+                    ("benchmark_manifest_present", benchmark_manifest_count > 0),
+                    ("review_source_present", review_source_count > 0),
+                )
+                if present
+            ],
+            missing_proofs=[
+                "normalized_gate_verdict",
+                "benchmark_pass_fail_verdict",
+                "privacy_review_verdict",
+                "rollback_ref",
+                "authority_scope_verdict",
+                "publication_approval",
+            ],
+        )
         cards.append(
             {
                 "schema_version": CAPABILITY_CARD_SCHEMA,
@@ -1126,19 +1435,20 @@ def build_capability_cards(
                 "name": f"{repo} creator system",
                 "owner_repo": repo,
                 "surface_type": "creator-system",
-                "status": capability_card_status_from_labs(surface),
+                "status": status,
+                **trust,
                 "requested_authority": ["local_files_read", "review_only"],
                 "memory_policy": "non_authoritative_evidence_only",
                 "evidence_summary": {
-                    "schema_count": int(schema_inventory.get("schema_count") or 0),
-                    "creator_run_count": int(artifacts.get("run_count") or 0),
+                    "schema_count": schema_count,
+                    "creator_run_count": creator_run_count,
                     "artifact_presence_counts": artifact_counts,
                 },
                 "benchmark_summary": {
-                    "benchmark_manifest_count": int(artifact_counts.get("benchmark_manifest") or 0),
+                    "benchmark_manifest_count": benchmark_manifest_count,
                 },
                 "review_summary": {
-                    "review_source_count": bool_count(review_sources),
+                    "review_source_count": review_source_count,
                     "review_sources": {
                         key: bool(as_dict(value).get("exists")) for key, value in sorted(review_sources.items())
                     },
@@ -1162,6 +1472,50 @@ def build_capability_cards(
         schema_inventory = as_dict(surface.get("schema_inventory"))
         artifacts = as_dict(surface.get("collective_artifacts"))
         governance_sources = as_dict(surface.get("publication_governance_sources"))
+        status = capability_card_status_from_specialization(surface)
+        configured_path_count = int(config.get("path_count") or 0)
+        schema_count = int(schema_inventory.get("schema_count") or 0)
+        promotion_packet_count = int(artifacts.get("promotion_packet_count") or 0)
+        evidence_ledger_count = int(artifacts.get("evidence_ledger_count") or 0)
+        benchmark_adapter_counts = as_dict(config.get("benchmark_adapter_counts"))
+        rollback_policy_counts = as_dict(config.get("rollback_policy_counts"))
+        governance_source_count = bool_count(governance_sources)
+        trust = capability_trust_fields(
+            status=status,
+            compiled_proofs={
+                "schema_present": schema_count > 0,
+                "configured_paths_present": configured_path_count > 0,
+                "promotion_packets_present": promotion_packet_count > 0,
+                "evidence_ledgers_present": evidence_ledger_count > 0,
+                "benchmark_adapter_config_present": bool(benchmark_adapter_counts),
+                "rollback_policy_config_present": bool(rollback_policy_counts),
+                "publication_governance_sources_present": governance_source_count > 0,
+                "trace_refs_present": False,
+                "rollback_refs_present": False,
+                "publication_approval_present": False,
+            },
+            trust_basis=[
+                basis
+                for basis, present in (
+                    ("schema_present", schema_count > 0),
+                    ("configured_paths_present", configured_path_count > 0),
+                    ("promotion_packets_present", promotion_packet_count > 0),
+                    ("evidence_ledgers_present", evidence_ledger_count > 0),
+                    ("benchmark_adapter_config_present", bool(benchmark_adapter_counts)),
+                    ("rollback_policy_config_present", bool(rollback_policy_counts)),
+                    ("publication_governance_source_present", governance_source_count > 0),
+                )
+                if present
+            ],
+            missing_proofs=[
+                "benchmark_pass_fail_verdict",
+                "publication_approval_verdict",
+                "privacy_review_verdict",
+                "rollback_ref",
+                "authority_scope_verdict",
+                "trace_or_proof_ref",
+            ],
+        )
         cards.append(
             {
                 "schema_version": CAPABILITY_CARD_SCHEMA,
@@ -1169,23 +1523,24 @@ def build_capability_cards(
                 "name": f"{repo} specialization path",
                 "owner_repo": repo,
                 "surface_type": "specialization-path",
-                "status": capability_card_status_from_specialization(surface),
+                "status": status,
+                **trust,
                 "requested_authority": ["local_files_read", "review_only"],
                 "memory_policy": "selective_or_surface_defined",
                 "evidence_summary": {
-                    "configured_path_count": int(config.get("path_count") or 0),
-                    "schema_count": int(schema_inventory.get("schema_count") or 0),
-                    "promotion_packet_count": int(artifacts.get("promotion_packet_count") or 0),
-                    "evidence_ledger_count": int(artifacts.get("evidence_ledger_count") or 0),
+                    "configured_path_count": configured_path_count,
+                    "schema_count": schema_count,
+                    "promotion_packet_count": promotion_packet_count,
+                    "evidence_ledger_count": evidence_ledger_count,
                 },
                 "benchmark_summary": {
                     "loop_kind_counts": as_dict(config.get("loop_kind_counts")),
-                    "benchmark_adapter_counts": as_dict(config.get("benchmark_adapter_counts")),
+                    "benchmark_adapter_counts": benchmark_adapter_counts,
                     "evolution_mode_counts": as_dict(config.get("evolution_mode_counts")),
-                    "rollback_policy_counts": as_dict(config.get("rollback_policy_counts")),
+                    "rollback_policy_counts": rollback_policy_counts,
                 },
                 "review_summary": {
-                    "publication_governance_source_count": bool_count(governance_sources),
+                    "publication_governance_source_count": governance_source_count,
                     "publication_governance_sources": {
                         key: bool(as_dict(value).get("exists")) for key, value in sorted(governance_sources.items())
                     },
@@ -1258,6 +1613,295 @@ def summarize_memory_run_artifacts(builder_home: Path) -> dict[str, Any]:
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
     return out
+
+
+def memory_review_item(
+    *,
+    item_id: str,
+    severity: str,
+    category: str,
+    owner_repo: str,
+    source_surface: str,
+    reason_code: str,
+    recommended_action: str,
+    count: int,
+    target_kind: str = "aggregate_bucket",
+    target_ref: str | None = None,
+    request_id_present: bool | None = None,
+    trace_ref_present: bool | None = None,
+    source_family: str | None = None,
+    authority: str | None = None,
+    movement_state: str | None = None,
+    memory_role: str | None = None,
+    retention_class: str | None = None,
+) -> dict[str, Any]:
+    operator_paths = memory_review_operator_paths(
+        category=category,
+        owner_repo=owner_repo,
+        source_surface=source_surface,
+        movement_state=movement_state,
+        retention_class=retention_class,
+        authority=authority,
+    )
+    return {
+        "id": item_id,
+        "severity": severity,
+        "category": category,
+        "owner_repo": owner_repo,
+        "source_surface": source_surface,
+        "target_kind": target_kind,
+        "target_ref": target_ref,
+        "request_id_present": request_id_present,
+        "trace_ref_present": trace_ref_present,
+        "source_family": source_family,
+        "authority": authority,
+        "movement_state": movement_state,
+        "memory_role": memory_role,
+        "retention_class": retention_class,
+        "salience_score_present": None,
+        "message_preview_present": False,
+        "count": int(count or 0),
+        "reason_code": reason_code,
+        "recommended_action": recommended_action,
+        "verification_command": "spark os memory --json",
+        "operator_paths": operator_paths,
+    }
+
+
+def memory_review_operator_paths(
+    *,
+    category: str,
+    owner_repo: str,
+    source_surface: str,
+    movement_state: str | None,
+    retention_class: str | None,
+    authority: str | None,
+) -> dict[str, Any]:
+    provenance_by_category = {
+        "trace_join": "Builder black-box trace join and memory movement export",
+        "candidate_review": "Builder approval inbox or memory dashboard candidate lane",
+        "privacy_redaction": "Spark OS compiler redaction report",
+        "authority_boundary": "domain-chip-memory movement contract and source hierarchy",
+        "current_state_audit": "domain-chip-memory current-state provenance lane",
+        "promotion_audit": "domain-chip-memory promotion and rollback audit lane",
+        "kb_snapshot_review": "spark-memory-quality-dashboard current-state KB panel",
+        "movement_export": "Builder metadata-only memory movement status export",
+    }
+    stale_current_by_category = {
+        "trace_join": "blocked_until_trace_join_exists",
+        "candidate_review": "candidate_until_source_review_promotes_or_rejects",
+        "privacy_redaction": "not_a_memory_truth_lane",
+        "authority_boundary": "supporting_rows_cannot_override_current_state",
+        "current_state_audit": "authoritative_current_requires_freshness_and_scope_check",
+        "promotion_audit": "promoted_rows_need_periodic_stale_current_revalidation",
+        "kb_snapshot_review": "current_state_snapshot_requires_dashboard_source_check",
+        "movement_export": "unavailable_until_source_export_is_supported",
+    }
+    purge_by_category = {
+        "trace_join": "no_purge_from_cockpit_repair_trace_context_first",
+        "candidate_review": "source_builder_approval_inbox_reject_or_archive",
+        "privacy_redaction": "compiler_omission_only_no_memory_mutation",
+        "authority_boundary": "source_domain_chip_memory_decay_or_demote_gate",
+        "current_state_audit": "source_domain_chip_memory_supersede_or_stale_preserve_gate",
+        "promotion_audit": "source_domain_chip_memory_rollback_or_decay_gate",
+        "kb_snapshot_review": "source_memory_dashboard_rebuild_or_review_queue",
+        "movement_export": "source_builder_export_repair",
+    }
+    return {
+        "source_owner": owner_repo,
+        "source_surface": source_surface,
+        "provenance_drilldown": provenance_by_category.get(category, source_surface),
+        "stale_current_adjudication": stale_current_by_category.get(
+            category,
+            "source_owner_must_adjudicate_before_memory_truth_changes",
+        ),
+        "purge_or_decay_path": purge_by_category.get(category, "source_owner_review_required"),
+        "cockpit_action": "read_only_observe_and_route",
+        "movement_state": movement_state,
+        "retention_class": retention_class,
+        "authority": authority,
+    }
+
+
+def build_memory_review_queue(memory_index: dict[str, Any]) -> dict[str, Any]:
+    safe_status = as_dict(memory_index.get("safe_status_export"))
+    status = as_dict(safe_status.get("status"))
+    movement_counts = as_dict(status.get("movement_counts"))
+    authority_counts = as_dict(status.get("authority_counts"))
+    source_family_counts = as_dict(status.get("source_family_counts"))
+    record_counts = as_dict(status.get("record_counts"))
+    kb_artifacts = as_dict(memory_index.get("memory_kb_artifacts"))
+    kb_lanes = as_dict(kb_artifacts.get("lane_counts"))
+    current_state_lane = as_dict(kb_lanes.get("current_state"))
+    items: list[dict[str, Any]] = []
+
+    export_status = str(status.get("status") or "missing")
+    row_count = int(status.get("row_count") or 0)
+    if export_status != "supported":
+        items.append(
+            memory_review_item(
+                item_id="memory-export-not-supported",
+                severity="critical",
+                category="movement_export",
+                owner_repo="spark-intelligence-builder",
+                source_surface="Builder memory movement export",
+                reason_code="memory_movement_export_not_supported",
+                recommended_action="Restore Builder's metadata-only memory movement status export before Cockpit review.",
+                count=1,
+                target_kind="status_export",
+                target_ref="memory-movement-status",
+            )
+        )
+
+    captured_count = int(movement_counts.get("captured") or 0)
+    if captured_count:
+        items.append(
+            memory_review_item(
+                item_id="captured-memory-needs-review",
+                severity="high",
+                category="candidate_review",
+                owner_repo="spark-intelligence-builder",
+                source_surface="Builder memory movement export",
+                reason_code="captured_candidates_present",
+                recommended_action="Review captured candidates in the source memory dashboard or Builder approval inbox without exporting proposed text.",
+                count=captured_count,
+                movement_state="captured",
+                retention_class="candidate",
+            )
+        )
+
+    promoted_count = int(movement_counts.get("promoted") or 0)
+    if promoted_count:
+        items.append(
+            memory_review_item(
+                item_id="promoted-memory-audit",
+                severity="medium",
+                category="promotion_audit",
+                owner_repo="domain-chip-memory",
+                source_surface="domain-chip-memory movement contract",
+                reason_code="promoted_rows_need_periodic_audit",
+                recommended_action="Audit promoted-memory buckets against provenance, evaluation, approval, and rollback gates.",
+                count=promoted_count,
+                movement_state="promoted",
+                retention_class="durable",
+            )
+        )
+
+    supporting_count = int(authority_counts.get("supporting_not_authoritative") or 0)
+    if supporting_count:
+        items.append(
+            memory_review_item(
+                item_id="supporting-memory-boundary-review",
+                severity="medium",
+                category="authority_boundary",
+                owner_repo="domain-chip-memory",
+                source_surface="domain-chip-memory movement contract",
+                reason_code="supporting_rows_must_not_override_authoritative_memory",
+                recommended_action="Confirm supporting/advisory rows remain non-authoritative and cannot override current-state memory.",
+                count=supporting_count,
+                source_family="episodic_summary",
+                authority="supporting_not_authoritative",
+                retention_class="supporting",
+            )
+        )
+
+    current_authoritative_count = int(authority_counts.get("authoritative_current") or 0)
+    if current_authoritative_count:
+        items.append(
+            memory_review_item(
+                item_id="authoritative-current-memory-audit",
+                severity="medium",
+                category="current_state_audit",
+                owner_repo="domain-chip-memory",
+                source_surface="domain-chip-memory movement contract",
+                reason_code="authoritative_current_rows_present",
+                recommended_action="Spot-check authoritative current-state buckets for source scope, freshness, and rollback availability.",
+                count=current_authoritative_count,
+                source_family="current_state",
+                authority="authoritative_current",
+                retention_class="current_state",
+            )
+        )
+
+    current_state_file_count = int(current_state_lane.get("file_count") or 0)
+    if current_state_file_count:
+        items.append(
+            memory_review_item(
+                item_id="memory-kb-current-state-files-review",
+                severity="low",
+                category="kb_snapshot_review",
+                owner_repo="spark-memory-quality-dashboard",
+                source_surface="Spark memory KB artifacts",
+                reason_code="current_state_kb_files_present",
+                recommended_action="Use the memory dashboard source module for current-state provenance drilldown; Cockpit should keep file names and bodies hidden.",
+                count=current_state_file_count,
+                target_kind="kb_lane",
+                target_ref="current_state",
+                source_family="current_state",
+                retention_class="current_state",
+            )
+        )
+
+    raw_hint_count = int(safe_status.get("raw_hint_key_count") or 0)
+    if raw_hint_count:
+        items.append(
+            memory_review_item(
+                item_id="memory-export-redaction-review",
+                severity="high",
+                category="privacy_redaction",
+                owner_repo="spark-cli",
+                source_surface="Spark OS compiler",
+                reason_code="raw_memory_hint_keys_omitted",
+                recommended_action="Keep omitted raw-hint fields out of OS artifacts and verify no review queue item includes memory body fields.",
+                count=raw_hint_count,
+                target_kind="compiler_redaction",
+                target_ref="safe_status_export",
+            )
+        )
+
+    if row_count:
+        items.append(
+            memory_review_item(
+                item_id="memory-trace-join-not-compiled",
+                severity="high",
+                category="trace_join",
+                owner_repo="spark-intelligence-builder",
+                source_surface="Builder memory movement export",
+                reason_code="memory_rows_lack_compiled_trace_join",
+                recommended_action="Join memory movement buckets to trace ids after Builder event envelopes carry stable trace refs.",
+                count=row_count,
+                request_id_present=None,
+                trace_ref_present=None,
+                target_kind="movement_rows",
+            )
+        )
+
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    items = sorted(
+        items,
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity")), 9),
+            -int(item.get("count") or 0),
+            str(item.get("id")),
+        ),
+    )
+    return {
+        "schema_version": MEMORY_REVIEW_QUEUE_SCHEMA,
+        "generated_at": utc_now(),
+        "authority": "observability_non_authoritative",
+        "source": "spark.memory_movement_index.compiled.v0",
+        "redaction": "aggregate metadata only; proposed text, memory bodies, relation fields, evidence payloads, and message previews omitted",
+        "counts": {
+            "item_count": len(items),
+            "movement_row_count": row_count,
+            "movement_counts": movement_counts,
+            "authority_counts": authority_counts,
+            "source_family_counts": source_family_counts,
+            "record_counts": record_counts,
+        },
+        "items": items,
+        "non_override_rules": as_list(status.get("non_override_rules")),
+    }
 
 
 def inspect_builder_memory_tables(builder_home: Path) -> dict[str, Any]:
@@ -2295,10 +2939,189 @@ def build_authority_view(desktop: Path, setup_summary: dict[str, Any]) -> dict[s
     }
 
 
+def trace_repair_id(*parts: Any) -> str:
+    value = "-".join(str(part or "missing").lower() for part in parts)
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    return value[:96] or "trace-repair"
+
+
+def trace_repair_owner(component: str) -> dict[str, str]:
+    return as_dict(TRACE_REPAIR_COMPONENT_OWNERS.get(component)) or {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": f"{component} event emission",
+    }
+
+
+def build_trace_current_health(trace_index: dict[str, Any]) -> dict[str, Any]:
+    trace_health = as_dict(trace_index.get("builder_trace_health"))
+    recent_windows = [as_dict(row) for row in as_list(trace_health.get("recent_windows"))]
+    total_missing = int(trace_health.get("missing_trace_ref_count") or 0)
+    current_window = next(
+        (
+            row
+            for label in ("1h", "24h")
+            for row in recent_windows
+            if row.get("window") == label and int(row.get("row_count") or 0)
+        ),
+        None,
+    )
+    if current_window is None and recent_windows:
+        current_window = recent_windows[0]
+
+    if not current_window:
+        status = "unknown"
+        row_count = 0
+        missing_count = 0
+        ratio = 0.0
+        window = "unknown"
+    else:
+        window = str(current_window.get("window") or "unknown")
+        row_count = int(current_window.get("row_count") or 0)
+        missing_count = int(current_window.get("missing_trace_ref_count") or 0)
+        ratio = float(current_window.get("missing_trace_ref_ratio") or 0.0)
+        if row_count and missing_count:
+            status = "current_missing_trace_refs"
+        elif row_count and total_missing:
+            status = "current_clean_historical_backlog"
+        elif row_count:
+            status = "current_clean"
+        elif total_missing:
+            status = "no_recent_events_historical_backlog"
+        else:
+            status = "clean"
+
+    return {
+        "schema_version": "spark.trace_current_health.v0",
+        "status": status,
+        "window": window,
+        "row_count": row_count,
+        "missing_trace_ref_count": missing_count,
+        "missing_trace_ref_ratio": ratio,
+        "total_missing_trace_ref_count": total_missing,
+        "historical_missing_trace_ref_count": max(total_missing - missing_count, 0),
+        "repair_scope": (
+            "current"
+            if status == "current_missing_trace_refs"
+            else "historical_backlog"
+            if status in {"current_clean_historical_backlog", "no_recent_events_historical_backlog"}
+            else status
+        ),
+        "redaction": "aggregate recency metadata only; no raw event text or identifiers",
+    }
+
+
+def build_trace_repair_queue(trace_index: dict[str, Any]) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+    trace_health = as_dict(trace_index.get("builder_trace_health"))
+    current_health = as_dict(trace_index.get("trace_current_health")) or build_trace_current_health(trace_index)
+    historical_scope = str(current_health.get("repair_scope") or "") == "historical_backlog"
+    telegram_gate = as_dict(trace_index.get("telegram_final_answer_gate_samples"))
+    telegram_join = as_dict(telegram_gate.get("trace_join"))
+    spawner = as_dict(trace_index.get("spawner_prd_auto_trace_samples"))
+    spawner_join = as_dict(spawner.get("join_keys"))
+    spawner_request_overlap = as_dict(spawner.get("builder_request_overlap"))
+    spawner_trace_overlap = as_dict(spawner.get("builder_trace_ref_overlap"))
+
+    if telegram_gate.get("exists") and telegram_join.get("status") != "join_key_present":
+        queue.append(
+            {
+                "id": "telegram-final-answer-missing-join-key",
+                "priority": "critical",
+                "rank_reason": "blocks Telegram -> Builder trace joins",
+                "owner_repo": "spark-telegram-bot",
+                "source_module": "final-answer gate audit producer",
+                "event_producer_family": "telegram_final_answer_gate",
+                "missing_field": "request_id_or_trace_ref",
+                "observed_event_count": int(telegram_gate.get("parsed_count") or 0),
+                "safe_fix": "Emit request_id or trace_ref metadata with final-answer gate checks.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    spawner_request_count = int(spawner_join.get("request_id_count") or 0)
+    spawner_overlap_count = int(spawner_request_overlap.get("matched_builder_request_id_count") or 0)
+    spawner_trace_overlap_count = int(spawner_trace_overlap.get("matched_builder_trace_ref_count") or 0)
+    if spawner_request_count and not (spawner_overlap_count or spawner_trace_overlap_count):
+        queue.append(
+            {
+                "id": "spawner-builder-missing-shared-trace",
+                "priority": "critical",
+                "rank_reason": "blocks Builder -> Spawner mission reconstruction",
+                "owner_repo": "spawner-ui",
+                "source_module": "PRD auto trace / Builder mission bridge",
+                "event_producer_family": "spawner_prd_auto_trace",
+                "missing_field": "shared_request_id_or_trace_ref",
+                "observed_event_count": spawner_request_count,
+                "safe_fix": "Write the Builder request id or derived trace ref into Spawner mission events and Builder mission events.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    rows = as_list(as_dict(trace_health.get("missing_trace_ref_sources")).get("rows"))
+    for row in rows[:10]:
+        row = as_dict(row)
+        component = str(row.get("component") or "unknown")
+        event_type = str(row.get("event_type") or "unknown")
+        owner = trace_repair_owner(component)
+        rank_reason = "largest Builder producer bucket missing trace_ref"
+        safe_fix = "Thread the active request_id/trace_ref into this event producer before recording black-box events."
+        if historical_scope:
+            rank_reason = "historical Builder backlog missing trace_ref; recent trace window is clean"
+            safe_fix = (
+                "Verify whether this historical bucket still reproduces; new traffic may already carry trace refs."
+            )
+        queue.append(
+            {
+                "id": trace_repair_id("builder", component, event_type, "missing-trace-ref"),
+                "priority": "medium" if historical_scope else "high",
+                "rank_reason": rank_reason,
+                "owner_repo": owner.get("owner_repo"),
+                "source_module": owner.get("source_module"),
+                "event_producer_family": component,
+                "event_type": event_type,
+                "missing_field": "trace_ref",
+                "observed_event_count": int(row.get("event_count") or 0),
+                "temporal_scope": "historical_backlog" if historical_scope else "current_or_unknown",
+                "current_health_status": current_health.get("status"),
+                "current_window": current_health.get("window"),
+                "current_window_missing_trace_ref_count": int(current_health.get("missing_trace_ref_count") or 0),
+                "safe_fix": safe_fix,
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    high_open_count = int(trace_health.get("high_severity_open_count") or 0)
+    if high_open_count:
+        queue.append(
+            {
+                "id": "builder-open-high-severity-events",
+                "priority": "medium",
+                "rank_reason": "high severity events remain open",
+                "owner_repo": "spark-intelligence-builder",
+                "source_module": "Builder black-box event lifecycle",
+                "event_producer_family": "builder_events",
+                "missing_field": "resolution_or_close_event",
+                "observed_event_count": high_open_count,
+                "safe_fix": "Add close/resolution metadata for high-severity events once the owning guardrail is repaired or confirmed active.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    return sorted(
+        queue,
+        key=lambda item: (
+            priority_rank.get(str(item.get("priority")), 9),
+            -int(item.get("observed_event_count") or 0),
+            str(item.get("id")),
+        ),
+    )
+
+
 def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
     spawner_state = spark_home / "state" / "spawner-ui"
     telegram_state = spark_home / "state" / "spark-telegram-bot"
-    return {
+    trace_index = {
         "schema_version": TRACE_INDEX_SCHEMA,
         "generated_at": utc_now(),
         "redaction": "aggregate metadata only; no raw event summaries, mission responses, logs, or message text",
@@ -2321,16 +3144,20 @@ def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
             spawner_state / "prd-auto-trace.jsonl",
             builder_home=builder_home,
         ),
+        "authority_verdicts": inspect_spawner_authority_verdicts(spawner_state / "prd-auto-trace.jsonl"),
         "next_required_bridges": [
             "Map Spawner mission ids to Builder mission_changed_state events.",
             "Map Telegram final-answer gate checks to final_answer_checked black-box events.",
             "Emit Telegram request_id or trace_ref join keys from final-answer gate checks.",
         ],
     }
+    trace_index["trace_current_health"] = build_trace_current_health(trace_index)
+    trace_index["trace_repair_queue"] = build_trace_repair_queue(trace_index)
+    return trace_index
 
 
 def build_memory_movement_index(builder_home: Path) -> dict[str, Any]:
-    return {
+    memory_index = {
         "schema_version": MEMORY_MOVEMENT_INDEX_SCHEMA,
         "generated_at": utc_now(),
         "authority": "observability_non_authoritative",
@@ -2349,6 +3176,8 @@ def build_memory_movement_index(builder_home: Path) -> dict[str, Any]:
             "Promote this index into Builder AOC and cockpit as evidence only, never as instructions or profile truth.",
         ],
     }
+    memory_index["memory_review_queue"] = build_memory_review_queue(memory_index)
+    return memory_index
 
 
 def build_gaps(system_map: dict[str, Any]) -> list[dict[str, str]]:
@@ -2407,6 +3236,404 @@ def build_gaps(system_map: dict[str, Any]) -> list[dict[str, str]]:
     return list(deduped.values())
 
 
+def repo_owner_surface(name: str) -> str:
+    if name in OWNER_SURFACES:
+        return OWNER_SURFACES[name]
+    if name.startswith("domain-chip-"):
+        return "domain chip candidate"
+    if name.startswith("specialization-path-"):
+        return "specialization path candidate"
+    if "telegram" in name:
+        return "Telegram-adjacent surface"
+    if "swarm" in name:
+        return "Swarm-adjacent surface"
+    if "spark" in name:
+        return "Spark-adjacent repo"
+    return "unclassified"
+
+
+def repo_manifest_presence(repo: dict[str, Any]) -> dict[str, bool]:
+    contract_files = set(as_list(repo.get("contract_files")))
+    return {
+        "spark_toml": bool(as_dict(repo.get("spark_toml"))),
+        "spark_chip": bool(as_dict(repo.get("spark_chip"))),
+        "skill_manifest": bool(as_dict(repo.get("skill_manifest"))),
+        "agents_md": "AGENTS.md" in contract_files,
+        "contract_file_count": bool(contract_files),
+    }
+
+
+def repo_release_status(name: str, git: dict[str, Any], manifest: dict[str, bool], registry_present: bool) -> tuple[str, str | None, str]:
+    dirty = int(git.get("dirty_tracked_count") or 0)
+    untracked = int(git.get("untracked_count") or 0)
+    behind = int(git.get("behind") or 0)
+    if not git.get("available"):
+        return "not_release_candidate", "not a git repo", "inspect or ignore before product work"
+    if dirty or untracked:
+        return "blocked", "dirty worktree", "curate local changes before merge or release"
+    if behind:
+        return "blocked", "behind upstream", "pull or merge upstream before release"
+    if name in CORE_REPOS and not any(manifest.values()):
+        return "blocked", "core repo missing Spark manifest", "add or confirm owner manifest before release"
+    if registry_present:
+        return "eligible", None, "safe to consider for the next verified workstream"
+    return "inspect", "not in installer registry", "decide whether this repo should remain local, become a capability, or be ignored"
+
+
+def repo_risk_class(name: str, release_eligibility: str) -> str:
+    if name in {"spark-cli", "spark-intelligence-builder", "spark-telegram-bot", "spawner-ui"}:
+        return "critical"
+    if release_eligibility == "blocked":
+        return "high"
+    if name in CORE_REPOS:
+        return "medium"
+    return "low"
+
+
+def build_repo_board(system_map: dict[str, Any]) -> dict[str, Any]:
+    registry_modules = set(as_dict(system_map.get("registry", {}).get("modules")).keys())
+    installed_modules = set(as_dict(system_map.get("installed_modules")).keys())
+    rows: list[dict[str, Any]] = []
+
+    for repo in as_list(system_map.get("discovered_repos")):
+        repo = as_dict(repo)
+        name = str(repo.get("name") or "")
+        ids = repo_ids(repo)
+        registry_present = bool(ids & registry_modules)
+        installed_present = bool(ids & installed_modules)
+        git = git_board_status(Path(str(repo.get("path") or "")))
+        manifest = repo_manifest_presence(repo)
+        release_eligibility, do_not_merge_reason, next_safe_action = repo_release_status(name, git, manifest, registry_present)
+        rows.append(
+            {
+                "repo": name,
+                "path": repo.get("path"),
+                "branch": git.get("branch"),
+                "upstream": git.get("upstream"),
+                "ahead": git.get("ahead"),
+                "behind": git.get("behind"),
+                "dirty_tracked_count": git.get("dirty_tracked_count"),
+                "untracked_count": git.get("untracked_count"),
+                "last_commit": git.get("last_commit"),
+                "git_available": git.get("available"),
+                "manifest_presence": manifest,
+                "registry_present": registry_present,
+                "installed_present": installed_present,
+                "module_ids": sorted(ids),
+                "owner_surface": repo_owner_surface(name),
+                "release_eligibility": release_eligibility,
+                "risk_class": repo_risk_class(name, release_eligibility),
+                "next_safe_action": next_safe_action,
+                "do_not_merge_reason": do_not_merge_reason,
+            }
+        )
+
+    summary = {
+        "repo_count": len(rows),
+        "git_repo_count": sum(1 for row in rows if row["git_available"]),
+        "dirty_repo_count": sum(1 for row in rows if int(row.get("dirty_tracked_count") or 0) or int(row.get("untracked_count") or 0)),
+        "blocked_release_count": sum(1 for row in rows if row["release_eligibility"] == "blocked"),
+        "critical_repo_count": sum(1 for row in rows if row["risk_class"] == "critical"),
+    }
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(str(row["risk_class"]), 4),
+            {"blocked": 0, "inspect": 1, "eligible": 2, "not_release_candidate": 3}.get(str(row["release_eligibility"]), 4),
+            str(row["repo"]).lower(),
+        ),
+    )
+    return {
+        "schema_version": REPO_BOARD_SCHEMA,
+        "generated_at": utc_now(),
+        "redaction": "repo status metadata only; filenames, diffs, env files, logs, and untracked file names omitted",
+        "summary": summary,
+        "next_actions": [
+            {
+                "repo": row["repo"],
+                "risk_class": row["risk_class"],
+                "release_eligibility": row["release_eligibility"],
+                "next_safe_action": row["next_safe_action"],
+                "do_not_merge_reason": row["do_not_merge_reason"],
+            }
+            for row in ranked[:20]
+        ],
+        "repos": rows,
+    }
+
+
+def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
+    repos = [as_dict(repo) for repo in as_list(system_map.get("discovered_repos"))]
+    repo_names = {str(repo.get("name")) for repo in repos}
+    repo_paths = {
+        str(repo.get("name")): Path(str(repo.get("path"))).expanduser()
+        for repo in repos
+        if isinstance(repo.get("path"), str) and str(repo.get("path")).strip()
+    }
+    installed_modules = set(as_dict(system_map.get("installed_modules")).keys())
+    available = "spark-voice-comms" in repo_names
+    installed = "spark-voice-comms" in installed_modules
+    source_roots = as_dict(system_map.get("source_roots"))
+
+    runtime_state_error = "spark_home_missing"
+    runtime_state: dict[str, Any] = {}
+    spark_home_raw = source_roots.get("spark_home")
+    if isinstance(spark_home_raw, str) and spark_home_raw.strip():
+        runtime_state_path = Path(spark_home_raw).expanduser() / "state" / "spark-voice-comms" / "voice-runtime-state.json"
+        runtime_state_raw, runtime_state_error = read_json(runtime_state_path)
+        if isinstance(runtime_state_raw, dict):
+            runtime_state = runtime_state_raw
+
+    runtime_state_export_present = runtime_state.get("schema_version") == "spark.voice_runtime_state.v1"
+    if runtime_state and not runtime_state_export_present:
+        runtime_state_error = "invalid_schema"
+
+    runtime_stt = as_dict(runtime_state.get("stt")) if runtime_state_export_present else {}
+    runtime_tts = as_dict(runtime_state.get("tts")) if runtime_state_export_present else {}
+    runtime_delivery = as_dict(runtime_state.get("telegram_delivery")) if runtime_state_export_present else {}
+    runtime_claims = as_dict(runtime_state.get("claim_levels")) if runtime_state_export_present else {}
+    runtime_sources = [str(item) for item in as_list(runtime_state.get("source_ledger"))] if runtime_state_export_present else []
+    stt_ready = runtime_stt.get("ready") is True
+    tts_ready = runtime_tts.get("ready") is True
+    delivery_ready = runtime_delivery.get("ready") is True
+    configured = runtime_claims.get("configured") is True or stt_ready or tts_ready
+
+    def source_file_contains(repo_name: str, relative: str, *needles: str) -> bool:
+        root = repo_paths.get(repo_name)
+        if root is None:
+            return False
+        path = root / relative
+        if not path.exists() or not path.is_file():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return all(needle in text for needle in needles)
+
+    voice_hook_has_transcribe = source_file_contains(
+        "spark-voice-comms",
+        "src/voice_comms_chip/spark_hook.py",
+        "voice.transcribe",
+    )
+    voice_hook_has_speak = source_file_contains(
+        "spark-voice-comms",
+        "src/voice_comms_chip/spark_hook.py",
+        "voice.speak",
+    )
+    voice_hook_has_status = source_file_contains(
+        "spark-voice-comms",
+        "src/voice_comms_chip/spark_hook.py",
+        "voice.status",
+    )
+    builder_has_transcribe_bridge = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice.transcribe",
+    )
+    builder_has_speak_bridge = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice.speak",
+    )
+    builder_has_status_bridge = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice.status",
+    )
+    builder_has_transcript_preview = source_file_contains(
+        "spark-intelligence-builder",
+        "src/spark_intelligence/adapters/telegram/runtime.py",
+        "voice_transcript_preview",
+    )
+    telegram_has_voice_bridge = source_file_contains(
+        "spark-telegram-bot",
+        "src/telegramVoiceBridge.ts",
+        "voice",
+    ) or source_file_contains(
+        "spark-telegram-bot",
+        "src/index.ts",
+        "telegramVoiceBridge",
+    )
+
+    ingress_source_present = voice_hook_has_transcribe and builder_has_transcribe_bridge
+    egress_source_present = voice_hook_has_speak and builder_has_speak_bridge
+    if ingress_source_present and egress_source_present:
+        source_mode = "duplex"
+    elif ingress_source_present:
+        source_mode = "ingress"
+    elif egress_source_present:
+        source_mode = "egress"
+    else:
+        source_mode = "disabled"
+
+    runtime_egress_ready = tts_ready and delivery_ready
+    if stt_ready and runtime_egress_ready:
+        runtime_mode = "duplex"
+    elif stt_ready:
+        runtime_mode = "ingress"
+    elif runtime_egress_ready:
+        runtime_mode = "egress"
+    else:
+        runtime_mode = source_mode
+
+    hard_blocked = not available or not installed or source_mode == "disabled" or builder_has_transcript_preview
+    final_answer_supported = delivery_ready and telegram_has_voice_bridge
+
+    blockers = []
+    if not available:
+        blockers.append("spark-voice-comms repo not discovered")
+    if available and not installed:
+        blockers.append("spark-voice-comms is not installed in local Spark state")
+    if available and source_mode == "disabled":
+        blockers.append("voice ingress/egress source hooks are not detected")
+    if available and installed and not runtime_state_export_present:
+        blockers.append("voice provider/profile runtime status is not exported to Spark OS state")
+    if runtime_state_export_present and runtime_claims.get("synthesis_ready") is not True:
+        blockers.append("voice synthesis is not ready")
+    if runtime_state_export_present and runtime_claims.get("delivery_ready") is not True:
+        blockers.append("voice Telegram delivery is not proven")
+    if not final_answer_supported:
+        blockers.append("voice final-answer join evidence is not compiled")
+    if builder_has_transcript_preview:
+        blockers.append("Builder retains raw voice transcript preview in private trace fields")
+
+    trace_evidence = "missing_source_hooks"
+    if source_mode != "disabled" and runtime_state_export_present:
+        trace_evidence = "runtime_state_export_present"
+        if not final_answer_supported:
+            trace_evidence = "runtime_state_export_present_delivery_unproven"
+    elif source_mode != "disabled":
+        trace_evidence = "source_present_not_proven"
+
+    provider_kind = first_string(
+        runtime_stt.get("provider_kind"),
+        runtime_stt.get("mode"),
+        runtime_tts.get("mode"),
+        "unknown",
+    )
+    voice_style_ref = first_string(
+        runtime_tts.get("voice_name"),
+        runtime_tts.get("voice_id_masked"),
+        runtime_tts.get("voice_id_fingerprint"),
+    )
+
+    return {
+        "schema_version": VOICE_SURFACE_SCHEMA,
+        "generated_at": utc_now(),
+        "owner_system": "spark-voice-comms",
+        "mode": "disabled" if hard_blocked else runtime_mode,
+        "source_capability": {
+            "repo_discovered": available,
+            "installed_in_spark_state": installed,
+            "source_mode": source_mode,
+            "ingress_source_present": ingress_source_present,
+            "egress_source_present": egress_source_present,
+            "duplex_source_present": source_mode == "duplex",
+            "status_hook_present": voice_hook_has_status and builder_has_status_bridge,
+            "telegram_bridge_present": telegram_has_voice_bridge,
+        },
+        "provider": {
+            "configured": configured,
+            "kind": provider_kind if configured else "unknown",
+            "stt_ready": stt_ready,
+            "tts_ready": tts_ready,
+            "runtime_state_export_present": runtime_state_export_present,
+        },
+        "profile": {"configured": bool(voice_style_ref), "voice_style_ref": voice_style_ref or None},
+        "authority": {
+            "can_answer": runtime_egress_ready and final_answer_supported and not hard_blocked,
+            "can_trigger_actions": False,
+            "requires_confirmation_for_actions": True,
+        },
+        "memory_policy": {
+            "transcripts_are_durable_by_default": False,
+            "raw_audio_exported_to_os_artifacts": False,
+            "transcript_bodies_exported_to_os_artifacts": False,
+        },
+        "trace": {
+            "voice_events_supported": bool(runtime_sources),
+            "final_answer_check_supported": final_answer_supported,
+            "source_hooks_present": source_mode != "disabled",
+            "telegram_delivery_bridge_present": telegram_has_voice_bridge,
+            "runtime_state_export_present": runtime_state_export_present,
+            "runtime_state_error": None if runtime_state_export_present else runtime_state_error,
+            "stt_ready": stt_ready,
+            "tts_ready": tts_ready,
+            "delivery_ready": delivery_ready,
+            "conversation_ready": runtime_claims.get("conversation_ready") is True,
+            "trace_evidence": trace_evidence,
+        },
+        "privacy_findings": {"builder_transcript_preview_present": builder_has_transcript_preview},
+        "blockers": blockers,
+        "redaction": "metadata only; raw audio, transcript bodies, provider secrets, and voice profile secrets omitted",
+    }
+
+
+def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
+    system_map = as_dict(compiled.get("system_map"))
+    repo_board = as_dict(compiled.get("repo_board"))
+    trace_index = as_dict(compiled.get("trace_index"))
+    capability_catalog = as_dict(compiled.get("capability_catalog"))
+    voice_surface = as_dict(compiled.get("voice_surface_view"))
+    return {
+        "schema_version": OPERATING_COCKPIT_SCHEMA,
+        "generated_at": utc_now(),
+        "product_decision": "Spark Operating Cockpit is the single daily command center. Source repos keep runtime truth; the Cockpit owns the unified operator experience.",
+        "privacy": {
+            "raw_secret_values_allowed": False,
+            "raw_chat_ids_allowed": False,
+            "raw_user_wording_allowed": False,
+            "raw_memory_bodies_allowed": False,
+            "raw_audio_allowed": False,
+            "raw_transcript_bodies_allowed": False,
+        },
+        "input_artifacts": {
+            "system_map": {
+                "schema_version": system_map.get("schema_version"),
+                "module_count": len(as_list(system_map.get("modules"))),
+                "repo_count": len(as_list(system_map.get("discovered_repos"))),
+            },
+            "repo_board": {
+                "schema_version": repo_board.get("schema_version"),
+                "repo_count": as_dict(repo_board.get("summary")).get("repo_count"),
+                "dirty_repo_count": as_dict(repo_board.get("summary")).get("dirty_repo_count"),
+            },
+            "trace_index": {
+                "schema_version": trace_index.get("schema_version"),
+                "builder_event_count": as_dict(trace_index.get("builder_events")).get("row_count"),
+                "trace_repair_candidate_count": len(as_list(trace_index.get("trace_repair_queue"))),
+                "authority_verdict_count": as_dict(trace_index.get("authority_verdicts")).get("verdict_count"),
+            },
+            "capability_catalog": {
+                "schema_version": capability_catalog.get("schema_version"),
+                "capability_card_count": len(as_list(capability_catalog.get("capability_cards"))),
+                "chip_manifest_count": len(as_list(capability_catalog.get("chip_manifests"))),
+            },
+            "voice_surface": {
+                "schema_version": voice_surface.get("schema_version"),
+                "mode": voice_surface.get("mode"),
+                "blocker_count": len(as_list(voice_surface.get("blockers"))),
+            },
+            "memory_review_queue": {
+                "schema_version": as_dict(as_dict(compiled.get("memory_movement_index")).get("memory_review_queue")).get(
+                    "schema_version"
+                ),
+                "item_count": as_dict(
+                    as_dict(as_dict(compiled.get("memory_movement_index")).get("memory_review_queue")).get("counts")
+                ).get("item_count"),
+            },
+        },
+        "action_boundary": "Read-only until high-agency actions carry AuthorityVerdictV1 trace evidence.",
+        "trace_repair_queue": as_list(trace_index.get("trace_repair_queue"))[:5],
+        "authority_verdicts": as_list(as_dict(trace_index.get("authority_verdicts")).get("items"))[:5],
+        "memory_review_queue": as_list(
+            as_dict(as_dict(compiled.get("memory_movement_index")).get("memory_review_queue")).get("items")
+        )[:5],
+        "top_blockers": as_list(system_map.get("gaps"))[:10],
+    }
+
+
 def compile_system_map(desktop: Path, spark_home: Path, registry_path: Path) -> dict[str, Any]:
     state_dir = spark_home / "state"
     registry, registry_error = read_json(registry_path)
@@ -2448,13 +3675,17 @@ def compile_system_map(desktop: Path, spark_home: Path, registry_path: Path) -> 
     system_map["modules"] = build_modules(registry_summary, installed_summary, repos, running)
     system_map["gaps"] = build_gaps(system_map)
 
-    return {
+    compiled = {
         "system_map": system_map,
         "authority_view": build_authority_view(desktop, setup_summary),
         "capability_catalog": build_capability_catalog(repos),
         "trace_index": build_trace_index(spark_home, builder_home),
         "memory_movement_index": build_memory_movement_index(builder_home),
     }
+    compiled["repo_board"] = build_repo_board(system_map)
+    compiled["voice_surface_view"] = build_voice_surface_view(system_map)
+    compiled["operating_cockpit"] = build_operating_cockpit(compiled)
+    return compiled
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -2510,6 +3741,9 @@ def write_compiled_outputs(out_dir: Path, compiled: dict[str, Any]) -> dict[str,
         "capability_catalog": out_dir / "capability-catalog.json",
         "trace_index": out_dir / "trace-index.json",
         "memory_movement_index": out_dir / "memory-movement-index.json",
+        "repo_board": out_dir / "repo-board.json",
+        "voice_surface_view": out_dir / "voice-surface-view.json",
+        "operating_cockpit": out_dir / "operating-cockpit.json",
         "gaps": out_dir / "gaps.md",
     }
     write_json(paths["system_map"], system_map)
@@ -2517,6 +3751,9 @@ def write_compiled_outputs(out_dir: Path, compiled: dict[str, Any]) -> dict[str,
     write_json(paths["capability_catalog"], compiled["capability_catalog"])
     write_json(paths["trace_index"], compiled["trace_index"])
     write_json(paths["memory_movement_index"], compiled["memory_movement_index"])
+    write_json(paths["repo_board"], compiled["repo_board"])
+    write_json(paths["voice_surface_view"], compiled["voice_surface_view"])
+    write_json(paths["operating_cockpit"], compiled["operating_cockpit"])
     write_gaps_markdown(paths["gaps"], as_list(system_map.get("gaps")), system_map)
     return {key: str(path) for key, path in paths.items()}
 
@@ -2526,6 +3763,8 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
     capability_catalog = as_dict(compiled["capability_catalog"])
     trace_index = as_dict(compiled["trace_index"])
     memory_index = as_dict(compiled["memory_movement_index"])
+    repo_board = as_dict(compiled.get("repo_board"))
+    voice_surface = as_dict(compiled.get("voice_surface_view"))
     builder_events = as_dict(trace_index.get("builder_events"))
     builder_event_samples = as_dict(trace_index.get("builder_event_samples"))
     builder_trace_groups = as_dict(trace_index.get("builder_trace_groups"))
@@ -2554,6 +3793,9 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
         "memory_movement_status": memory_status.get("status"),
         "memory_movement_rows": memory_status.get("row_count"),
         "builder_memory_table_count": builder_memory_tables.get("table_count"),
+        "repo_board": as_dict(repo_board.get("summary")),
+        "voice_surface_mode": voice_surface.get("mode"),
+        "voice_surface_blockers": len(as_list(voice_surface.get("blockers"))),
         "privacy": system_map.get("privacy"),
         "outputs": written or {},
     }

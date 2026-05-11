@@ -5524,13 +5524,19 @@ def cmd_os_capabilities(args: argparse.Namespace) -> int:
     cards = catalog.get("capability_cards") if isinstance(catalog.get("capability_cards"), list) else []
     status_counts: dict[str, int] = {}
     surface_counts: dict[str, int] = {}
+    proof_state_counts: dict[str, int] = {}
+    trust_status_counts: dict[str, int] = {}
     for card in cards:
         if not isinstance(card, dict):
             continue
         status = str(card.get("status") or "unknown")
         surface = str(card.get("surface_type") or "unknown")
+        proof_state = str(card.get("proof_state") or "unknown")
+        trust_status = str(card.get("trust_status") or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
         surface_counts[surface] = surface_counts.get(surface, 0) + 1
+        proof_state_counts[proof_state] = proof_state_counts.get(proof_state, 0) + 1
+        trust_status_counts[trust_status] = trust_status_counts.get(trust_status, 0) + 1
 
     payload = {
         "schema_version": "spark.os_capabilities.summary.v0",
@@ -5538,6 +5544,8 @@ def cmd_os_capabilities(args: argparse.Namespace) -> int:
         "card_count": len(cards),
         "status_counts": dict(sorted(status_counts.items())),
         "surface_counts": dict(sorted(surface_counts.items())),
+        "proof_state_counts": dict(sorted(proof_state_counts.items())),
+        "trust_status_counts": dict(sorted(trust_status_counts.items())),
         "cards": cards,
         "redaction": "Capability cards are compiled from metadata only; commands, packet bodies, logs, and raw evidence are omitted.",
     }
@@ -5551,6 +5559,10 @@ def cmd_os_capabilities(args: argparse.Namespace) -> int:
         print(f"- {surface}: {count}")
     for status, count in payload["status_counts"].items():
         print(f"- {status}: {count}")
+    for proof_state, count in payload["proof_state_counts"].items():
+        print(f"- proof {proof_state}: {count}")
+    for trust_status, count in payload["trust_status_counts"].items():
+        print(f"- trust {trust_status}: {count}")
     print("Redaction: commands, packet bodies, logs, and raw evidence are omitted.")
     return 0
 
@@ -5642,6 +5654,9 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
     spawner_trace_overlap = _safe_mapping(spawner.get("builder_trace_ref_overlap"))
     telegram_gate = _safe_mapping(trace_index.get("telegram_final_answer_gate_samples"))
     telegram_join = _safe_mapping(telegram_gate.get("trace_join"))
+    authority_verdicts = _safe_mapping(trace_index.get("authority_verdicts"))
+    trace_current_health = _safe_mapping(trace_index.get("trace_current_health"))
+    trace_repair_queue = _safe_list(trace_index.get("trace_repair_queue"))
     payload = {
         "schema_version": "spark.os_trace.summary.v0",
         "generated_at": trace_index.get("generated_at"),
@@ -5650,11 +5665,16 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
         "missing_trace_ref_count": _safe_int(trace_health.get("missing_trace_ref_count")),
         "high_severity_open_count": _safe_int(trace_health.get("high_severity_open_count")),
         "orphan_parent_event_id_count": _safe_int(trace_health.get("orphan_parent_event_id_count")),
+        "authority_verdict_count": _safe_int(authority_verdicts.get("verdict_count")),
+        "authority_verdict_counts": _safe_mapping(authority_verdicts.get("verdict_counts")),
         "health_flags": _safe_list(trace_health.get("health_flags")),
         "recent_windows": _safe_list(trace_health.get("recent_windows")),
+        "trace_current_health": trace_current_health,
         "top_missing_trace_ref_sources": _safe_list(
             _safe_mapping(trace_health.get("missing_trace_ref_sources")).get("rows")
         )[:10],
+        "trace_repair_queue": trace_repair_queue[:10],
+        "next_trace_repair": trace_repair_queue[0] if trace_repair_queue else None,
         "cross_system_trace": {
             "spawner_request_id_count": _safe_int(spawner_join.get("request_id_count")),
             "spawner_derived_trace_ref_count": _safe_int(spawner_join.get("derived_trace_ref_count")),
@@ -5678,12 +5698,30 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
     print(f"- Builder events: {payload['builder_event_count']}")
     print(f"- trace groups: {payload['trace_group_count']}")
     print(f"- missing trace refs: {payload['missing_trace_ref_count']}")
+    current_health = _safe_mapping(payload.get("trace_current_health"))
+    if current_health:
+        print(
+            "- current trace health: "
+            f"{current_health.get('status') or 'unknown'} "
+            f"({current_health.get('window') or 'unknown'} "
+            f"{_safe_int(current_health.get('missing_trace_ref_count'))}/"
+            f"{_safe_int(current_health.get('row_count'))} missing)"
+        )
     print(f"- open high-severity events: {payload['high_severity_open_count']}")
+    print(f"- authority verdicts: {payload['authority_verdict_count']}")
     print(
         "- Spawner request overlaps: "
         f"{cross_system['spawner_builder_request_overlap_count']}/{cross_system['spawner_request_id_count']}"
     )
     print(f"- Telegram final-answer join: {cross_system['telegram_final_answer_trace_join_status']}")
+    next_repair = _safe_mapping(payload.get("next_trace_repair"))
+    if next_repair:
+        print(
+            "- next repair: "
+            f"{next_repair.get('owner_repo')} / {next_repair.get('event_producer_family')} "
+            f"needs {next_repair.get('missing_field')} "
+            f"({next_repair.get('temporal_scope') or 'current_or_unknown'})"
+        )
     print("Redaction: aggregate trace metadata only; raw event bodies and message text are omitted.")
     return 0
 
@@ -5698,6 +5736,8 @@ def cmd_os_memory(args: argparse.Namespace) -> int:
     status = _safe_mapping(safe_status.get("status"))
     kb_artifacts = _safe_mapping(memory_index.get("memory_kb_artifacts"))
     current_state = _safe_mapping(_safe_mapping(kb_artifacts.get("lane_counts")).get("current_state"))
+    memory_review_queue = _safe_mapping(memory_index.get("memory_review_queue"))
+    memory_review_items = _safe_list(memory_review_queue.get("items"))
     payload = {
         "schema_version": "spark.os_memory.summary.v0",
         "generated_at": memory_index.get("generated_at"),
@@ -5710,6 +5750,8 @@ def cmd_os_memory(args: argparse.Namespace) -> int:
         "record_counts": _safe_mapping(status.get("record_counts")),
         "kb_file_count": _safe_int(kb_artifacts.get("file_count")),
         "current_state_file_count": _safe_int(current_state.get("file_count")),
+        "memory_review_queue": memory_review_queue,
+        "next_memory_review": memory_review_items[0] if memory_review_items else None,
         "memory_movement_index": memory_index,
         "redaction": memory_index.get("redaction"),
     }
@@ -5724,6 +5766,18 @@ def cmd_os_memory(args: argparse.Namespace) -> int:
     print(f"- authority: {payload['authority_counts']}")
     print(f"- records: {payload['record_counts']}")
     print(f"- KB files: {payload['kb_file_count']}")
+    next_review = _safe_mapping(payload.get("next_memory_review"))
+    if next_review:
+        operator_paths = _safe_mapping(next_review.get("operator_paths"))
+        print(
+            "- next review: "
+            f"{next_review.get('owner_repo')} / {next_review.get('category')} "
+            f"({next_review.get('reason_code')})"
+        )
+        if operator_paths:
+            print(f"- provenance path: {operator_paths.get('provenance_drilldown')}")
+            print(f"- stale/current gate: {operator_paths.get('stale_current_adjudication')}")
+            print(f"- purge path: {operator_paths.get('purge_or_decay_path')}")
     print("Redaction: aggregate memory metadata only; raw memory text and row bodies are omitted.")
     return 0
 
