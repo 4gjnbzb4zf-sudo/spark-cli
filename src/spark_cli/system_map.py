@@ -1635,6 +1635,14 @@ def memory_review_item(
     memory_role: str | None = None,
     retention_class: str | None = None,
 ) -> dict[str, Any]:
+    operator_paths = memory_review_operator_paths(
+        category=category,
+        owner_repo=owner_repo,
+        source_surface=source_surface,
+        movement_state=movement_state,
+        retention_class=retention_class,
+        authority=authority,
+    )
     return {
         "id": item_id,
         "severity": severity,
@@ -1656,6 +1664,62 @@ def memory_review_item(
         "reason_code": reason_code,
         "recommended_action": recommended_action,
         "verification_command": "spark os memory --json",
+        "operator_paths": operator_paths,
+    }
+
+
+def memory_review_operator_paths(
+    *,
+    category: str,
+    owner_repo: str,
+    source_surface: str,
+    movement_state: str | None,
+    retention_class: str | None,
+    authority: str | None,
+) -> dict[str, Any]:
+    provenance_by_category = {
+        "trace_join": "Builder black-box trace join and memory movement export",
+        "candidate_review": "Builder approval inbox or memory dashboard candidate lane",
+        "privacy_redaction": "Spark OS compiler redaction report",
+        "authority_boundary": "domain-chip-memory movement contract and source hierarchy",
+        "current_state_audit": "domain-chip-memory current-state provenance lane",
+        "promotion_audit": "domain-chip-memory promotion and rollback audit lane",
+        "kb_snapshot_review": "spark-memory-quality-dashboard current-state KB panel",
+        "movement_export": "Builder metadata-only memory movement status export",
+    }
+    stale_current_by_category = {
+        "trace_join": "blocked_until_trace_join_exists",
+        "candidate_review": "candidate_until_source_review_promotes_or_rejects",
+        "privacy_redaction": "not_a_memory_truth_lane",
+        "authority_boundary": "supporting_rows_cannot_override_current_state",
+        "current_state_audit": "authoritative_current_requires_freshness_and_scope_check",
+        "promotion_audit": "promoted_rows_need_periodic_stale_current_revalidation",
+        "kb_snapshot_review": "current_state_snapshot_requires_dashboard_source_check",
+        "movement_export": "unavailable_until_source_export_is_supported",
+    }
+    purge_by_category = {
+        "trace_join": "no_purge_from_cockpit_repair_trace_context_first",
+        "candidate_review": "source_builder_approval_inbox_reject_or_archive",
+        "privacy_redaction": "compiler_omission_only_no_memory_mutation",
+        "authority_boundary": "source_domain_chip_memory_decay_or_demote_gate",
+        "current_state_audit": "source_domain_chip_memory_supersede_or_stale_preserve_gate",
+        "promotion_audit": "source_domain_chip_memory_rollback_or_decay_gate",
+        "kb_snapshot_review": "source_memory_dashboard_rebuild_or_review_queue",
+        "movement_export": "source_builder_export_repair",
+    }
+    return {
+        "source_owner": owner_repo,
+        "source_surface": source_surface,
+        "provenance_drilldown": provenance_by_category.get(category, source_surface),
+        "stale_current_adjudication": stale_current_by_category.get(
+            category,
+            "source_owner_must_adjudicate_before_memory_truth_changes",
+        ),
+        "purge_or_decay_path": purge_by_category.get(category, "source_owner_review_required"),
+        "cockpit_action": "read_only_observe_and_route",
+        "movement_state": movement_state,
+        "retention_class": retention_class,
+        "authority": authority,
     }
 
 

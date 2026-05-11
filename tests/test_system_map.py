@@ -412,9 +412,17 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertGreater(index["safe_status_export"]["raw_hint_key_count"], 0)
         self.assertEqual(index["memory_review_queue"]["schema_version"], "spark.memory_review_queue.v1")
         self.assertGreater(index["memory_review_queue"]["counts"]["item_count"], 0)
+        self.assertTrue(all(item.get("operator_paths") for item in index["memory_review_queue"]["items"]))
         self.assertTrue(
             any(item["reason_code"] == "raw_memory_hint_keys_omitted" for item in index["memory_review_queue"]["items"])
         )
+        redaction_item = next(
+            item
+            for item in index["memory_review_queue"]["items"]
+            if item["reason_code"] == "raw_memory_hint_keys_omitted"
+        )
+        self.assertEqual(redaction_item["operator_paths"]["cockpit_action"], "read_only_observe_and_route")
+        self.assertEqual(redaction_item["operator_paths"]["purge_or_decay_path"], "compiler_omission_only_no_memory_mutation")
         self.assertNotIn("My private fact", encoded)
         self.assertNotIn("telegram-token-value", encoded)
         self.assertNotIn("human-telegram-123-profile-preferred-name", encoded)

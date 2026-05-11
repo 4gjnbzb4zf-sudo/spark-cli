@@ -5768,11 +5768,16 @@ def cmd_os_memory(args: argparse.Namespace) -> int:
     print(f"- KB files: {payload['kb_file_count']}")
     next_review = _safe_mapping(payload.get("next_memory_review"))
     if next_review:
+        operator_paths = _safe_mapping(next_review.get("operator_paths"))
         print(
             "- next review: "
             f"{next_review.get('owner_repo')} / {next_review.get('category')} "
             f"({next_review.get('reason_code')})"
         )
+        if operator_paths:
+            print(f"- provenance path: {operator_paths.get('provenance_drilldown')}")
+            print(f"- stale/current gate: {operator_paths.get('stale_current_adjudication')}")
+            print(f"- purge path: {operator_paths.get('purge_or_decay_path')}")
     print("Redaction: aggregate memory metadata only; raw memory text and row bodies are omitted.")
     return 0
 
