@@ -229,6 +229,12 @@ class SparkSystemMapTests(unittest.TestCase):
                 cli_dir.mkdir(parents=True)
                 (cli_dir / "cli.py").write_text(builder_cli_markers, encoding="utf-8")
             (spawner_audit_route / "+server.ts").write_text("spawnerStateRootAudit", encoding="utf-8")
+            spawner_helper = spawner_source / "src" / "lib" / "server" / "spawner-state.ts"
+            spawner_helper.parent.mkdir(parents=True)
+            spawner_helper.write_text(
+                "export const state = process.env.SPAWNER_STATE_DIR || path.resolve(process.cwd(), '.spawner');",
+                encoding="utf-8",
+            )
             registry.write_text(
                 json.dumps(
                     {
@@ -293,6 +299,13 @@ class SparkSystemMapTests(unittest.TestCase):
         )
         spawner_item = next(item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "spawner-module-local-state-root")
         self.assertIn("State-root audit route exists", spawner_item["evidence"])
+        self.assertIn("cwd .spawner fallback", spawner_item["evidence"])
+        self.assertTrue(spawner_item["evidence_details"]["module_local_state_exists"])
+        self.assertTrue(spawner_item["evidence_details"]["state_root_audit_route_exists"])
+        self.assertTrue(spawner_item["evidence_details"]["configured_state_env_supported"])
+        self.assertTrue(spawner_item["evidence_details"]["cwd_spawner_fallback_present"])
+        self.assertEqual(spawner_item["evidence_details"]["reference_family_counts"]["src"], 1)
+        self.assertIn("source metadata only", spawner_item["evidence_details"]["redaction"])
         self.assertIn("/api/system/state-root", spawner_item["verification_command"])
         telegram_pin_item = next(
             item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "spark-telegram-bot-runtime-registry-pin-drift"

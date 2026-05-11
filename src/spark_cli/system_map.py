@@ -3715,6 +3715,50 @@ def builder_source_audit(path: Path) -> dict[str, Any]:
     }
 
 
+def spawner_state_source_audit(path: Path) -> dict[str, Any]:
+    reference_needles = (".spawner", "SPAWNER_STATE_DIR", "spawnerStateDir", "spawner-state")
+    family_counts: Counter[str] = Counter()
+    file_count = 0
+    for root_name in ["src", "scripts", "docs", "tests"]:
+        root = path / root_name
+        if not root.exists():
+            continue
+        for candidate in root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if any(part in {"node_modules", ".git", "dist", "build", ".svelte-kit"} for part in candidate.parts):
+                continue
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(needle in text for needle in reference_needles):
+                file_count += 1
+                family_counts[root_name] += 1
+
+    state_helper = path / "src" / "lib" / "server" / "spawner-state.ts"
+    helper_text = ""
+    if state_helper.exists():
+        try:
+            helper_text = state_helper.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            helper_text = ""
+
+    audit_route = path / "src" / "routes" / "api" / "system" / "state-root" / "+server.ts"
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "module_local_state_exists": (path / ".spawner").exists(),
+        "state_root_audit_route_exists": audit_route.exists(),
+        "state_helper_exists": state_helper.exists(),
+        "configured_state_env_supported": "SPAWNER_STATE_DIR" in helper_text,
+        "cwd_spawner_fallback_present": "'.spawner'" in helper_text or '".spawner"' in helper_text,
+        "reference_file_count": file_count,
+        "reference_family_counts": dict(sorted(family_counts.items())),
+        "redaction": "source metadata only; no mission files, provider results, prompts, or state row contents read",
+    }
+
+
 def git_dirty_from_repo(repo: dict[str, Any]) -> tuple[int, int]:
     git = as_dict(repo.get("git"))
     dirty = int(git.get("dirty_tracked_count") or 0)
@@ -3788,10 +3832,16 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
     spawner_local_state = spawner_source / ".spawner" if spawner_source_raw else Path()
     spawner_state_audit_route = spawner_source / "src" / "routes" / "api" / "system" / "state-root" / "+server.ts"
     if spawner_source_raw and spawner_local_state.exists():
+        spawner_audit = spawner_state_source_audit(spawner_source)
         audit_route_evidence = (
             " State-root audit route exists."
             if spawner_state_audit_route.exists()
             else " State-root audit route is not present yet."
+        )
+        fallback_evidence = (
+            " Source still contains a cwd .spawner fallback."
+            if spawner_audit.get("cwd_spawner_fallback_present")
+            else " No cwd .spawner fallback was detected in the state helper."
         )
         items.append(
             duplicate_truth_item(
@@ -3805,11 +3855,16 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
                 evidence=(
                     "Current compiler and proof artifacts use spark-home state while module-local Spawner state also exists."
                     + audit_route_evidence
+                    + fallback_evidence
                 ),
                 risk="Old mission files can be mistaken for current mission truth.",
-                next_safe_action="Use the Spawner state-root audit route, then curate remaining dirty-route .spawner wording or paths before archive.",
+                next_safe_action=(
+                    "Keep module-local state read-only and warning-only. Before archive, replace or gate the cwd .spawner fallback, "
+                    "then rerun source-reference scan, two clean compiles, and one live trace proof."
+                ),
                 verification_command="Invoke-WebRequest http://127.0.0.1:3333/api/system/state-root; rg -n \"\\\\.spawner|SPAWNER_STATE|stateDir\" src scripts",
                 rollback="Leave module-local state untouched and read-only until current runtime no longer reads or writes it.",
+                evidence_details=spawner_audit,
             )
         )
 
