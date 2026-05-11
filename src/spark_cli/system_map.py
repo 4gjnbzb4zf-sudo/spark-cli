@@ -3313,8 +3313,9 @@ def duplicate_truth_item(
     verification_command: str,
     rollback: str,
     severity: str = "warning",
+    evidence_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    item = {
         "id": item_id,
         "fact": fact,
         "classification": classification,
@@ -3327,6 +3328,50 @@ def duplicate_truth_item(
         "next_safe_action": next_safe_action,
         "verification_command": verification_command,
         "rollback": rollback,
+    }
+    if evidence_details is not None:
+        item["evidence_details"] = evidence_details
+    return item
+
+
+BUILDER_AOC_COMMAND_MARKERS = {
+    "panel": '"panel"',
+    "black-box": '"black-box"',
+    "source-used": '"source-used"',
+    "route-selection": '"route-selection"',
+    "mission-state": '"mission-state"',
+    "turn-trace": '"turn-trace"',
+}
+
+
+def builder_source_audit(path: Path) -> dict[str, Any]:
+    git = git_board_status(path)
+    cli_path = path / "src" / "spark_intelligence" / "cli.py"
+    command_markers: dict[str, bool] = {name: False for name in BUILDER_AOC_COMMAND_MARKERS}
+    trace_ref_argument_present = False
+    if cli_path.exists():
+        try:
+            text = cli_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        command_markers = {name: marker in text for name, marker in BUILDER_AOC_COMMAND_MARKERS.items()}
+        trace_ref_argument_present = "--trace-ref" in text
+
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "git_available": bool(git.get("available")),
+        "branch": git.get("branch"),
+        "upstream": git.get("upstream"),
+        "ahead": git.get("ahead"),
+        "behind": git.get("behind"),
+        "dirty_tracked_count": git.get("dirty_tracked_count"),
+        "untracked_count": git.get("untracked_count"),
+        "last_commit": git.get("last_commit"),
+        "cli_path_exists": cli_path.exists(),
+        "aoc_command_markers": command_markers,
+        "aoc_command_marker_count": sum(1 for present in command_markers.values() if present),
+        "trace_ref_argument_present": trace_ref_argument_present,
     }
 
 
@@ -3354,6 +3399,12 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
     builder_canonical = first_string(builder_installed.get("path"), builder_installed.get("source"))
     builder_nonrelease = spark_home / "modules" / "spark-intelligence-builder" / "source"
     if builder_canonical and builder_nonrelease.exists() and str(builder_nonrelease) != builder_canonical:
+        canonical_audit = builder_source_audit(Path(builder_canonical))
+        duplicate_audit = builder_source_audit(builder_nonrelease)
+        desktop_audit = builder_source_audit(desktop / "spark-intelligence-builder")
+        command_count = int(canonical_audit.get("aoc_command_marker_count") or 0)
+        trace_ref_present = bool(canonical_audit.get("trace_ref_argument_present"))
+        duplicate_dirty = int(duplicate_audit.get("dirty_tracked_count") or 0) + int(duplicate_audit.get("untracked_count") or 0)
         items.append(
             duplicate_truth_item(
                 item_id="builder-release-vs-nonrelease-installed-source",
@@ -3363,11 +3414,26 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
                 owner_repo="spark-intelligence-builder",
                 canonical_path=builder_canonical,
                 duplicate_path=str(builder_nonrelease),
-                evidence="Installed module metadata points at one Builder source while another installed-looking Builder source exists.",
+                evidence=(
+                    "Installed module metadata points at the release Builder source while another installed-looking Builder source exists. "
+                    f"Canonical release source exposes {command_count}/{len(BUILDER_AOC_COMMAND_MARKERS)} AOC command markers"
+                    f"{' with trace-ref support' if trace_ref_present else ' without detected trace-ref support'}."
+                ),
                 risk="Operators can patch the non-canonical source and believe Telegram is using it.",
-                next_safe_action="Compare the sources, port only proven missing behavior into the release install, then demote the duplicate after proof.",
+                next_safe_action=(
+                    "Keep the release installed source canonical; inspect the duplicate dirty worktree by feature family, "
+                    "port only proven missing behavior, then demote the duplicate after proof."
+                ),
                 verification_command="spark verify --onboarding --json",
                 rollback="Keep the duplicate source read-only until release install proof remains green.",
+                evidence_details={
+                    "canonical_release": canonical_audit,
+                    "duplicate_nonrelease": duplicate_audit,
+                    "desktop_owner": desktop_audit,
+                    "duplicate_dirty_file_count": duplicate_dirty,
+                    "onboarding_gate": "builder_runtime_source",
+                    "command_parity_probe": "python -m spark_intelligence.cli self --help",
+                },
             )
         )
 

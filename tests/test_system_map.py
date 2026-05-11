@@ -182,6 +182,21 @@ class SparkSystemMapTests(unittest.TestCase):
 
             for path in [desktop, state, builder_release, builder_legacy, spawner_source / ".spawner", spawner_audit_route, systems_repo]:
                 path.mkdir(parents=True)
+            builder_cli_markers = '\n'.join(
+                [
+                    '"panel"',
+                    '"black-box"',
+                    '"source-used"',
+                    '"route-selection"',
+                    '"mission-state"',
+                    '"turn-trace"',
+                    '"--trace-ref"',
+                ]
+            )
+            for builder_path in [builder_release, builder_legacy]:
+                cli_dir = builder_path / "src" / "spark_intelligence"
+                cli_dir.mkdir(parents=True)
+                (cli_dir / "cli.py").write_text(builder_cli_markers, encoding="utf-8")
             (spawner_audit_route / "+server.ts").write_text("spawnerStateRootAudit", encoding="utf-8")
             registry.write_text(
                 json.dumps(
@@ -221,6 +236,14 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertIn("spawner-module-local-state-root", item_ids)
         self.assertIn("spark-intelligence-systems-prototype-compiler", item_ids)
         self.assertIn("builder-release-vs-nonrelease-installed-source", cockpit_item_ids)
+        builder_item = next(
+            item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "builder-release-vs-nonrelease-installed-source"
+        )
+        self.assertEqual(builder_item["evidence_details"]["canonical_release"]["aoc_command_marker_count"], 6)
+        self.assertTrue(builder_item["evidence_details"]["canonical_release"]["trace_ref_argument_present"])
+        self.assertEqual(
+            builder_item["evidence_details"]["command_parity_probe"], "python -m spark_intelligence.cli self --help"
+        )
         spawner_item = next(item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "spawner-module-local-state-root")
         self.assertIn("State-root audit route exists", spawner_item["evidence"])
         self.assertIn("/api/system/state-root", spawner_item["verification_command"])
