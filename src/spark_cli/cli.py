@@ -5642,6 +5642,7 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
     spawner_trace_overlap = _safe_mapping(spawner.get("builder_trace_ref_overlap"))
     telegram_gate = _safe_mapping(trace_index.get("telegram_final_answer_gate_samples"))
     telegram_join = _safe_mapping(telegram_gate.get("trace_join"))
+    trace_repair_queue = _safe_list(trace_index.get("trace_repair_queue"))
     payload = {
         "schema_version": "spark.os_trace.summary.v0",
         "generated_at": trace_index.get("generated_at"),
@@ -5655,6 +5656,8 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
         "top_missing_trace_ref_sources": _safe_list(
             _safe_mapping(trace_health.get("missing_trace_ref_sources")).get("rows")
         )[:10],
+        "trace_repair_queue": trace_repair_queue[:10],
+        "next_trace_repair": trace_repair_queue[0] if trace_repair_queue else None,
         "cross_system_trace": {
             "spawner_request_id_count": _safe_int(spawner_join.get("request_id_count")),
             "spawner_derived_trace_ref_count": _safe_int(spawner_join.get("derived_trace_ref_count")),
@@ -5684,6 +5687,13 @@ def cmd_os_trace(args: argparse.Namespace) -> int:
         f"{cross_system['spawner_builder_request_overlap_count']}/{cross_system['spawner_request_id_count']}"
     )
     print(f"- Telegram final-answer join: {cross_system['telegram_final_answer_trace_join_status']}")
+    next_repair = _safe_mapping(payload.get("next_trace_repair"))
+    if next_repair:
+        print(
+            "- next repair: "
+            f"{next_repair.get('owner_repo')} / {next_repair.get('event_producer_family')} "
+            f"needs {next_repair.get('missing_field')}"
+        )
     print("Redaction: aggregate trace metadata only; raw event bodies and message text are omitted.")
     return 0
 

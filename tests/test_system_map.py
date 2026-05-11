@@ -15,6 +15,7 @@ from spark_cli.system_map import (
     build_capability_catalog,
     build_memory_movement_index,
     build_repo_board,
+    build_trace_repair_queue,
     build_voice_surface_view,
     collect_repo_metadata,
     count_safe_jsonl,
@@ -121,6 +122,49 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertIsNone(parsed["upstream"])
         self.assertEqual(parsed["ahead"], 0)
         self.assertEqual(parsed["behind"], 0)
+
+    def test_trace_repair_queue_is_ranked_and_metadata_only(self) -> None:
+        queue = build_trace_repair_queue(
+            {
+                "builder_trace_health": {
+                    "high_severity_open_count": 2,
+                    "missing_trace_ref_sources": {
+                        "rows": [
+                            {
+                                "component": "memory_orchestrator",
+                                "event_type": "memory_read_requested",
+                                "status": "recorded",
+                                "severity": "medium",
+                                "target_surface": "spark_intelligence_builder",
+                                "evidence_lane": "realworld_validated",
+                                "event_count": 12,
+                                "summary": "private user wording",
+                            }
+                        ]
+                    },
+                },
+                "telegram_final_answer_gate_samples": {
+                    "exists": True,
+                    "parsed_count": 3,
+                    "trace_join": {"status": "missing_join_key"},
+                    "top_keys": {"chat_id": 3},
+                },
+                "spawner_prd_auto_trace_samples": {
+                    "join_keys": {"request_id_count": 5, "derived_trace_ref_count": 4},
+                    "builder_request_overlap": {"matched_builder_request_id_count": 0},
+                    "builder_trace_ref_overlap": {"matched_builder_trace_ref_count": 0},
+                },
+            }
+        )
+        encoded = json.dumps(queue)
+
+        self.assertEqual(queue[0]["id"], "spawner-builder-missing-shared-trace")
+        self.assertEqual(queue[0]["priority"], "critical")
+        self.assertEqual(queue[1]["id"], "telegram-final-answer-missing-join-key")
+        self.assertEqual(queue[2]["owner_repo"], "spark-intelligence-builder")
+        self.assertEqual(queue[2]["missing_field"], "trace_ref")
+        self.assertNotIn("private user wording", encoded)
+        self.assertNotIn("chat_id", encoded)
 
     def test_cross_system_trace_samples_keep_join_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

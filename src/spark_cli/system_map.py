@@ -98,6 +98,61 @@ OWNER_SURFACES = {
 
 CORE_REPOS = set(OWNER_SURFACES)
 
+TRACE_REPAIR_COMPONENT_OWNERS = {
+    "agent_operating_context": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "Agent Operating Context event emission",
+    },
+    "attachment_snapshot": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "attachment snapshot event emission",
+    },
+    "attachments_cli": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "attachments CLI event emission",
+    },
+    "browser_cli": {
+        "owner_repo": "spark-cli",
+        "source_module": "browser-use CLI event emission",
+    },
+    "config_manager": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "config manager event emission",
+    },
+    "direct_provider": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "direct provider bridge event emission",
+    },
+    "doctor_cli": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "doctor CLI event emission",
+    },
+    "memory_doctor": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "memory doctor event emission",
+    },
+    "memory_orchestrator": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "memory orchestrator event emission",
+    },
+    "researcher_bridge": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "researcher bridge event emission",
+    },
+    "stop_ship_checks": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "stop-ship check event emission",
+    },
+    "swarm_bridge": {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": "Swarm bridge event emission",
+    },
+    "telegram_runtime": {
+        "owner_repo": "spark-telegram-bot",
+        "source_module": "Telegram runtime event emission",
+    },
+}
+
 SAFE_TELEGRAM_FINAL_ANSWER_FIELDS = (
     "ts",
     "event",
@@ -2410,10 +2465,118 @@ def build_authority_view(desktop: Path, setup_summary: dict[str, Any]) -> dict[s
     }
 
 
+def trace_repair_id(*parts: Any) -> str:
+    value = "-".join(str(part or "missing").lower() for part in parts)
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    return value[:96] or "trace-repair"
+
+
+def trace_repair_owner(component: str) -> dict[str, str]:
+    return as_dict(TRACE_REPAIR_COMPONENT_OWNERS.get(component)) or {
+        "owner_repo": "spark-intelligence-builder",
+        "source_module": f"{component} event emission",
+    }
+
+
+def build_trace_repair_queue(trace_index: dict[str, Any]) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+    trace_health = as_dict(trace_index.get("builder_trace_health"))
+    telegram_gate = as_dict(trace_index.get("telegram_final_answer_gate_samples"))
+    telegram_join = as_dict(telegram_gate.get("trace_join"))
+    spawner = as_dict(trace_index.get("spawner_prd_auto_trace_samples"))
+    spawner_join = as_dict(spawner.get("join_keys"))
+    spawner_request_overlap = as_dict(spawner.get("builder_request_overlap"))
+    spawner_trace_overlap = as_dict(spawner.get("builder_trace_ref_overlap"))
+
+    if telegram_gate.get("exists") and telegram_join.get("status") != "join_key_present":
+        queue.append(
+            {
+                "id": "telegram-final-answer-missing-join-key",
+                "priority": "critical",
+                "rank_reason": "blocks Telegram -> Builder trace joins",
+                "owner_repo": "spark-telegram-bot",
+                "source_module": "final-answer gate audit producer",
+                "event_producer_family": "telegram_final_answer_gate",
+                "missing_field": "request_id_or_trace_ref",
+                "observed_event_count": int(telegram_gate.get("parsed_count") or 0),
+                "safe_fix": "Emit request_id or trace_ref metadata with final-answer gate checks.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    spawner_request_count = int(spawner_join.get("request_id_count") or 0)
+    spawner_overlap_count = int(spawner_request_overlap.get("matched_builder_request_id_count") or 0)
+    spawner_trace_overlap_count = int(spawner_trace_overlap.get("matched_builder_trace_ref_count") or 0)
+    if spawner_request_count and not (spawner_overlap_count or spawner_trace_overlap_count):
+        queue.append(
+            {
+                "id": "spawner-builder-missing-shared-trace",
+                "priority": "critical",
+                "rank_reason": "blocks Builder -> Spawner mission reconstruction",
+                "owner_repo": "spawner-ui",
+                "source_module": "PRD auto trace / Builder mission bridge",
+                "event_producer_family": "spawner_prd_auto_trace",
+                "missing_field": "shared_request_id_or_trace_ref",
+                "observed_event_count": spawner_request_count,
+                "safe_fix": "Write the Builder request id or derived trace ref into Spawner mission events and Builder mission events.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    rows = as_list(as_dict(trace_health.get("missing_trace_ref_sources")).get("rows"))
+    for row in rows[:10]:
+        row = as_dict(row)
+        component = str(row.get("component") or "unknown")
+        event_type = str(row.get("event_type") or "unknown")
+        owner = trace_repair_owner(component)
+        queue.append(
+            {
+                "id": trace_repair_id("builder", component, event_type, "missing-trace-ref"),
+                "priority": "high",
+                "rank_reason": "largest Builder producer bucket missing trace_ref",
+                "owner_repo": owner.get("owner_repo"),
+                "source_module": owner.get("source_module"),
+                "event_producer_family": component,
+                "event_type": event_type,
+                "missing_field": "trace_ref",
+                "observed_event_count": int(row.get("event_count") or 0),
+                "safe_fix": "Thread the active request_id/trace_ref into this event producer before recording black-box events.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    high_open_count = int(trace_health.get("high_severity_open_count") or 0)
+    if high_open_count:
+        queue.append(
+            {
+                "id": "builder-open-high-severity-events",
+                "priority": "medium",
+                "rank_reason": "high severity events remain open",
+                "owner_repo": "spark-intelligence-builder",
+                "source_module": "Builder black-box event lifecycle",
+                "event_producer_family": "builder_events",
+                "missing_field": "resolution_or_close_event",
+                "observed_event_count": high_open_count,
+                "safe_fix": "Add close/resolution metadata for high-severity events once the owning guardrail is repaired or confirmed active.",
+                "verification_command": "spark os trace --json",
+            }
+        )
+
+    priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    return sorted(
+        queue,
+        key=lambda item: (
+            priority_rank.get(str(item.get("priority")), 9),
+            -int(item.get("observed_event_count") or 0),
+            str(item.get("id")),
+        ),
+    )
+
+
 def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
     spawner_state = spark_home / "state" / "spawner-ui"
     telegram_state = spark_home / "state" / "spark-telegram-bot"
-    return {
+    trace_index = {
         "schema_version": TRACE_INDEX_SCHEMA,
         "generated_at": utc_now(),
         "redaction": "aggregate metadata only; no raw event summaries, mission responses, logs, or message text",
@@ -2442,6 +2605,8 @@ def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
             "Emit Telegram request_id or trace_ref join keys from final-answer gate checks.",
         ],
     }
+    trace_index["trace_repair_queue"] = build_trace_repair_queue(trace_index)
+    return trace_index
 
 
 def build_memory_movement_index(builder_home: Path) -> dict[str, Any]:
@@ -2710,6 +2875,7 @@ def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
             "trace_index": {
                 "schema_version": trace_index.get("schema_version"),
                 "builder_event_count": as_dict(trace_index.get("builder_events")).get("row_count"),
+                "trace_repair_candidate_count": len(as_list(trace_index.get("trace_repair_queue"))),
             },
             "capability_catalog": {
                 "schema_version": capability_catalog.get("schema_version"),
@@ -2723,6 +2889,7 @@ def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
             },
         },
         "action_boundary": "Read-only until high-agency actions carry AuthorityVerdictV1 trace evidence.",
+        "trace_repair_queue": as_list(trace_index.get("trace_repair_queue"))[:5],
         "top_blockers": as_list(system_map.get("gaps"))[:10],
     }
 
