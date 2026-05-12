@@ -387,7 +387,7 @@ Use `spark <cmd> --help` for full flags.
 | `spark security revoke-all` | Stop Spark, rotate local control keys, remove local secrets, pause missions, and write a redacted support bundle |
 | `spark approval classify -- <command>` | Classify whether a command requires approval |
 | `spark telegram connect [profile]` | Connect or rotate a Telegram bot profile token |
-| `spark update [target]` | Re-run install commands and pull managed git clones |
+| `spark update [target]` | Preflight dirty runtime clones, pull managed git clones, and re-run install commands |
 | `spark uninstall [target]` | Stop, remove generated env, delete clone, and rotate secrets |
 | `spark start [target]` | Topological launch using `needs.modules` order |
 | `spark start spark-telegram-bot --profile <name>` | Start one named Telegram bot profile |
@@ -406,6 +406,8 @@ Use `spark <cmd> --help` for full flags.
 | `spark logs <module>` | Tail `~/.spark/logs/<module>/process.log` |
 | `spark secrets list|set|get|delete` | Keychain-backed secret store |
 | `spark config get|set|unset|list` | User config at `~/.spark/config/config.json` |
+
+`spark update` checks all selected installed-runtime clones for local edits before it stops services or runs install commands. Use `spark update --stash-local-runtime` for intentional local hotfix testing, `spark update --skip-dirty` to update only clean modules, and `spark update --continue` after manually fixing a preflight stop. If runtime processes were stopped and `SPARK_AUTOSTART=1`, update restarts Spark Live and prints a compact post-update health summary; use `--no-live-restart` to keep the stack manual.
 
 ## State Layout
 

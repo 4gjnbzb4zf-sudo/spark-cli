@@ -8120,6 +8120,79 @@ class SparkCliTests(unittest.TestCase):
         save.assert_called_once_with({})
         install.assert_called_once_with(module)
 
+    def test_cmd_update_restarts_live_when_autostart_enabled(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"}
+            },
+        )
+
+        class Args:
+            target = None
+            skip_install_commands = True
+            skip_dirty = False
+            stash_local_runtime = False
+            continue_update = False
+            no_live_restart = False
+
+        with patch.dict(os.environ, {"SPARK_AUTOSTART": "1"}), \
+             patch("spark_cli.cli.resolve_installed_target_modules", return_value=[module]), \
+             patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.load_pids", return_value={"spawner-ui": {"pid": 12345}}), \
+             patch("spark_cli.cli.pid_is_running", return_value=True), \
+             patch("spark_cli.cli.stop_module"), \
+             patch("spark_cli.cli.save_pids"), \
+             patch("spark_cli.cli.module_is_git_managed", return_value=False), \
+             patch("spark_cli.cli.run_module_hook"), \
+             patch("spark_cli.cli.load_json", return_value={"spawner-ui": {"installed_via": {"kind": "git", "target": "repo"}}}), \
+             patch("spark_cli.cli.install_module_record"), \
+             patch("spark_cli.cli.sync_generated_env_to_module"), \
+             patch("spark_cli.cli.cmd_live", return_value=0) as live, \
+             patch("spark_cli.cli.print_update_live_status_summary", return_value=0) as status:
+            self.assertEqual(cmd_update(Args()), 0)
+
+        live.assert_called_once()
+        self.assertEqual(live.call_args.args[0].live_command, "restart")
+        status.assert_called_once()
+
+    def test_cmd_update_no_live_restart_overrides_autostart(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"}
+            },
+        )
+
+        class Args:
+            target = None
+            skip_install_commands = True
+            skip_dirty = False
+            stash_local_runtime = False
+            continue_update = False
+            no_live_restart = True
+
+        with patch.dict(os.environ, {"SPARK_AUTOSTART": "1"}), \
+             patch("spark_cli.cli.resolve_installed_target_modules", return_value=[module]), \
+             patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.load_pids", return_value={"spawner-ui": {"pid": 12345}}), \
+             patch("spark_cli.cli.pid_is_running", return_value=True), \
+             patch("spark_cli.cli.stop_module"), \
+             patch("spark_cli.cli.save_pids"), \
+             patch("spark_cli.cli.module_is_git_managed", return_value=False), \
+             patch("spark_cli.cli.run_module_hook"), \
+             patch("spark_cli.cli.load_json", return_value={"spawner-ui": {"installed_via": {"kind": "git", "target": "repo"}}}), \
+             patch("spark_cli.cli.install_module_record"), \
+             patch("spark_cli.cli.sync_generated_env_to_module"), \
+             patch("spark_cli.cli.cmd_live") as live, \
+             patch("spark_cli.cli.print_update_live_status_summary") as status:
+            self.assertEqual(cmd_update(Args()), 0)
+
+        live.assert_not_called()
+        status.assert_not_called()
+
     def test_cmd_update_does_not_stop_processes_when_git_pull_fails(self) -> None:
         module = Module(
             name="spawner-ui",
@@ -8169,6 +8242,7 @@ class SparkCliTests(unittest.TestCase):
             skip_dirty = True
             stash_local_runtime = False
             continue_update = False
+            no_live_restart = False
 
         def fake_update(module: Module) -> tuple[bool, str]:
             return True, "Already up to date."
@@ -8211,6 +8285,7 @@ class SparkCliTests(unittest.TestCase):
             skip_dirty = False
             stash_local_runtime = False
             continue_update = False
+            no_live_restart = False
 
         with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[clean, dirty]), \
              patch("spark_cli.cli.print_install_summary"), \
@@ -8240,6 +8315,7 @@ class SparkCliTests(unittest.TestCase):
             skip_dirty = False
             stash_local_runtime = True
             continue_update = False
+            no_live_restart = False
 
         with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[dirty]), \
              patch("spark_cli.cli.print_install_summary"), \
@@ -8278,6 +8354,9 @@ class SparkCliTests(unittest.TestCase):
             target = "spark-telegram-bot"
             skip_install_commands = True
             skip_dirty = False
+            stash_local_runtime = False
+            continue_update = False
+            no_live_restart = False
 
         pids = {
             "spark-telegram-bot": {"pid": 111, "module": "spark-telegram-bot"},

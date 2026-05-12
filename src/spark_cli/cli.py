@@ -786,6 +786,38 @@ def print_dirty_update_preflight(dirty: list[tuple[Module, str]]) -> None:
     print("  commit or stash the module edits manually, then run spark update --continue")
 
 
+def update_should_restart_live(args: argparse.Namespace, stopped_processes: list[str]) -> bool:
+    if not stopped_processes:
+        return False
+    if getattr(args, "no_live_restart", False):
+        return False
+    return os.environ.get("SPARK_AUTOSTART", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def print_update_live_status_summary() -> int:
+    payload = collect_status_payload()
+    ok = bool(payload.get("ok"))
+    print("")
+    print("Post-update live state:")
+    print(f"  Spark Live: {'OK' if ok else 'needs attention'}")
+    profiles = payload.get("telegram_profiles")
+    if isinstance(profiles, list):
+        running = [item for item in profiles if isinstance(item, dict) and item.get("running")]
+        stopped = [item for item in profiles if isinstance(item, dict) and not item.get("running")]
+        print(f"  Telegram profiles: {len(running)} running, {len(stopped)} stopped")
+    modules = payload.get("modules") if isinstance(payload.get("modules"), list) else []
+    for name in ["spawner-ui", "spark-telegram-bot"]:
+        module = next((item for item in modules if isinstance(item, dict) and item.get("name") == name), None)
+        if isinstance(module, dict):
+            state = "OK" if module.get("healthy") else "attention"
+            print(f"  {name}: {state}")
+    if not ok and payload.get("repair_hints"):
+        print("  Repair:")
+        for hint in payload.get("repair_hints", [])[:2]:
+            print(f"    - {hint}")
+    return 0 if ok else 1
+
+
 def module_is_git_managed(module_path: Path) -> bool:
     try:
         return module_path.is_relative_to(SPARK_HOME / "modules")
@@ -12944,7 +12976,14 @@ def cmd_update(args: argparse.Namespace) -> int:
         print("  Skipped dirty: none")
     if stopped_processes:
         print(f"  Stopped runtime process(es): {', '.join(stopped_processes)}")
-        print("  Next: run `spark live restart`, then `spark live status`.")
+        if update_should_restart_live(args, stopped_processes):
+            print("  Autostart is enabled, so Spark will restart the live stack now.")
+            restart_code = cmd_live(argparse.Namespace(live_command="restart"))
+            status_code = print_update_live_status_summary()
+            if restart_code != 0 or status_code != 0:
+                return restart_code or status_code
+        else:
+            print("  Next: run `spark live restart`, then `spark live status`.")
     else:
         print("  Runtime processes stopped: none")
     return 0
@@ -13742,6 +13781,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--skip-dirty", action="store_true", help="Skip modules with local git changes and continue updating clean modules")
     update_parser.add_argument("--stash-local-runtime", action="store_true", help="Stash dirty installed-runtime module edits before updating")
     update_parser.add_argument("--continue", dest="continue_update", action="store_true", help="Resume after fixing a previous update preflight stop")
+    update_parser.add_argument("--no-live-restart", action="store_true", help="Do not restart Spark Live after updating stopped runtime services")
     update_parser.set_defaults(func=cmd_update)
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove installed modules from Spark state and generated config")
