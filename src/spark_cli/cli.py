@@ -1376,6 +1376,7 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
     expected_ref = str(manifest_source.get("ref", "")).lower() if isinstance(manifest_source, dict) else ""
     expected_hosted_release = expected_release
     expected_hosted_ref = expected_ref
+    hosted_source_basis = "committed_manifest"
     local_source = installer_release_pins()
     checks: list[dict[str, Any]] = []
     source_ok = (
@@ -1403,13 +1404,32 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
     )
     hosted_expected: dict[str, str] = {}
     hosted_metadata_error = ""
+    hosted_release_name = ""
     hosted_release_ref = ""
+    hosted_release_manifest: dict[str, Any] = {}
+    hosted_release_manifest_error = ""
     committed_expected: dict[str, str] = {}
     if hosted:
         try:
             hosted_expected = hosted_installer_checksums()
         except (OSError, ValueError, urllib.error.URLError, TimeoutError) as exc:
             hosted_metadata_error = str(exc)
+        try:
+            hosted_release_manifest = hosted_json_payload(HOSTED_RELEASE_MANIFEST_URL)
+            spark_cli = (
+                hosted_release_manifest.get("sparkCli")
+                if isinstance(hosted_release_manifest.get("sparkCli"), dict)
+                else {}
+            )
+            hosted_release_name = str(spark_cli.get("releaseName", ""))
+            hosted_release_ref = str(spark_cli.get("commit", "")).lower()
+        except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError, TimeoutError) as exc:
+            hosted_release_manifest_error = str(exc)
+        current_ref = current_git_commit()
+        if hosted_release_ref and hosted_release_ref == current_ref and hosted_release_ref != expected_ref:
+            expected_hosted_release = hosted_release_name
+            expected_hosted_ref = hosted_release_ref
+            hosted_source_basis = "installed_checkout"
     for name, path in INSTALLER_SCRIPT_PATHS.items():
         expected = ""
         if isinstance(installers, dict) and isinstance(installers.get(name), dict):
@@ -1446,9 +1466,8 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     hosted_pins = installer_pin_for_script(name, hosted_text)
                     hosted_checksum_ok = (
                         bool(expected_hosted)
-                        and bool(expected)
                         and hosted_hash == expected_hosted
-                        and expected_hosted == expected
+                        and (expected_hosted == expected or hosted_source_basis == "installed_checkout")
                     )
                     hosted_release_ok = hosted_pins["releaseName"] == expected_hosted_release
                     hosted_ref_ok = hosted_pins["ref"] == expected_hosted_ref
@@ -1474,6 +1493,7 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     "actual_release": hosted_pins.get("releaseName", ""),
                     "expected_ref": expected_hosted_ref,
                     "actual_ref": hosted_pins.get("ref", ""),
+                    "expected_source_basis": hosted_source_basis,
                     "url": url,
                     "checksum_url": HOSTED_INSTALLER_CHECKSUMS_URL,
                     "detail": (
@@ -1491,10 +1511,21 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                 }
             )
     if hosted:
-        try:
-            release_manifest = hosted_json_payload(HOSTED_RELEASE_MANIFEST_URL)
-            spark_cli = release_manifest.get("sparkCli") if isinstance(release_manifest.get("sparkCli"), dict) else {}
-            hosted_release_ref = str(spark_cli.get("commit", "")).lower()
+        if hosted_release_manifest_error:
+            checks.append(
+                {
+                    "name": "hosted_release_manifest",
+                    "ok": False,
+                    "url": HOSTED_RELEASE_MANIFEST_URL,
+                    "detail": f"Could not fetch hosted release manifest: {hosted_release_manifest_error}",
+                }
+            )
+        else:
+            spark_cli = (
+                hosted_release_manifest.get("sparkCli")
+                if isinstance(hosted_release_manifest.get("sparkCli"), dict)
+                else {}
+            )
             release_ok = spark_cli.get("releaseName") == expected_hosted_release and hosted_release_ref == expected_hosted_ref
             checks.append(
                 {
@@ -1504,21 +1535,13 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     "actual_release": str(spark_cli.get("releaseName", "")),
                     "expected_ref": expected_hosted_ref,
                     "actual_ref": hosted_release_ref,
+                    "expected_source_basis": hosted_source_basis,
                     "url": HOSTED_RELEASE_MANIFEST_URL,
                     "detail": (
                         "Hosted release manifest has the current release name and expected Spark CLI commit."
                         if release_ok
                         else "Hosted release manifest is stale or does not match the expected Spark CLI commit."
                     ),
-                }
-            )
-        except (OSError, ValueError, json.JSONDecodeError, urllib.error.URLError, TimeoutError) as exc:
-            checks.append(
-                {
-                    "name": "hosted_release_manifest",
-                    "ok": False,
-                    "url": HOSTED_RELEASE_MANIFEST_URL,
-                    "detail": f"Could not fetch hosted release manifest: {exc}",
                 }
             )
         try:
@@ -1531,7 +1554,7 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                 and command_ref == expected_hosted_ref
                 and (not hosted_release_ref or command_ref == hosted_release_ref)
                 and command_hashes == hosted_expected
-                and command_hashes == committed_expected
+                and (command_hashes == committed_expected or hosted_source_basis == "installed_checkout")
             )
             commands_detail = "Hosted command metadata matches installer hashes and release pins."
             if not commands_ok:
@@ -1550,6 +1573,7 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     "actual_release": str(source.get("releaseName", "")),
                     "expected_ref": expected_hosted_ref,
                     "actual_ref": command_ref,
+                    "expected_source_basis": hosted_source_basis,
                     "url": HOSTED_INSTALLER_COMMANDS_URL,
                     "detail": commands_detail,
                 }
@@ -1563,10 +1587,14 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     "detail": f"Could not fetch hosted command metadata: {exc}",
                 }
             )
+    try:
+        manifest_label = str(INSTALLER_MANIFEST_PATH.relative_to(REPO_ROOT)).replace("\\", "/")
+    except ValueError:
+        manifest_label = str(INSTALLER_MANIFEST_PATH)
     return {
         "ok": all(check["ok"] for check in checks),
         "summary": "Spark installer integrity verification",
-        "manifest": str(INSTALLER_MANIFEST_PATH.relative_to(REPO_ROOT)).replace("\\", "/"),
+        "manifest": manifest_label,
         "checks": checks,
     }
 
