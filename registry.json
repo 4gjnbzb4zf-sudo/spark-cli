@@ -26,7 +26,7 @@
     },
     "spark-telegram-bot": {
       "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-      "commit": "92b964116278168275f9faf7817e750fe3f2fb03",
+      "commit": "54985bc902f900d52a03a6f050f1db7f94990f43",
       "verify_ref": "refs/heads/release/stability-2026-05-09",
       "require_signed_commit": false,
       "blessed": true,
@@ -34,19 +34,19 @@
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/spark-telegram-bot",
-        "commit": "92b964116278168275f9faf7817e750fe3f2fb03"
+        "commit": "54985bc902f900d52a03a6f050f1db7f94990f43"
       }
     },
     "spark-intelligence-builder": {
       "source": "https://github.com/vibeforge1111/spark-intelligence-builder",
-      "commit": "98e447e12b3fff8ba95574e8ee8f7b1e96df6bd1",
+      "commit": "e2fc744e9852f6507d77972aea66808a4aa0b028",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Spark runtime core for identity, memory, and routing",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/spark-intelligence-builder",
-        "commit": "98e447e12b3fff8ba95574e8ee8f7b1e96df6bd1"
+        "commit": "e2fc744e9852f6507d77972aea66808a4aa0b028"
       }
     },
     "domain-chip-memory": {
@@ -75,14 +75,15 @@
     },
     "spawner-ui": {
       "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
-      "commit": "ef50e772411bac6853f872bf6d8ed675bfb69a7f",
+      "commit": "f6ffd138aacb18f0184f9f5ac727e330a4834f09",
+      "verify_ref": "refs/heads/release/stability-2026-05-11",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Execution plane and local dashboard for the Spark starter stack",
       "attestation": {
         "type": "git-commit-pin-v1",
         "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
-        "commit": "ef50e772411bac6853f872bf6d8ed675bfb69a7f"
+        "commit": "f6ffd138aacb18f0184f9f5ac727e330a4834f09"
       }
     }
   },
