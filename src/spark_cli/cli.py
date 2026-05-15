@@ -3669,6 +3669,9 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
     }
     if character is not None:
         gateway_env["SPARK_CHARACTER_ROOT"] = str(character.path)
+    gateway_env.update(
+        telegram_specialization_runtime_env_refs_from_installed(installed_records_from_modules(modules_by_name))
+    )
     gateway_env.update(llm_env)
 
     webhook_urls = telegram_profile_webhook_urls() or [default_telegram_webhook_url(args.spawner_ui_url)]
@@ -5407,6 +5410,90 @@ def builder_runtime_env_refs_from_installed(installed: object) -> dict[str, str]
     }
 
 
+def installed_records_from_modules(modules_by_name: dict[str, Module]) -> dict[str, dict[str, str]]:
+    return {name: {"path": str(module.path)} for name, module in modules_by_name.items()}
+
+
+def _mapping_path_candidates(values: dict[str, str], name: str) -> list[Path]:
+    raw = values.get(name, "")
+    if not raw.strip():
+        return []
+    return [Path(item).expanduser() for item in raw.split(os.pathsep) if item.strip()]
+
+
+def _mapping_named_path_candidates(values: dict[str, str], prefix: str, suffix: str) -> list[Path]:
+    candidates: list[Path] = []
+    for name, raw in values.items():
+        if not name.startswith(prefix) or not name.endswith(suffix) or not raw.strip():
+            continue
+        candidates.append(Path(raw).expanduser())
+    return candidates
+
+
+def specialization_repo_env_var(path_key: str) -> str:
+    normalized = str(path_key or "").strip().upper().replace("-", "_")
+    return f"SPARK_SWARM_SPECIALIZATION_PATH_{normalized}_REPO"
+
+
+def _specialization_path_candidates_from_values(values: dict[str, str]) -> list[Path]:
+    return [
+        *_mapping_path_candidates(values, "SPARK_SPECIALIZATION_PATH_ROOTS"),
+        *_mapping_named_path_candidates(values, "SPARK_SWARM_SPECIALIZATION_PATH_", "_REPO"),
+    ]
+
+
+def telegram_specialization_runtime_env_refs_from_installed(
+    installed: object,
+    current_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    current = current_env or {}
+    refs: dict[str, str] = {}
+    env_values = dict(os.environ)
+    swarm_root = first_existing_path(unique_path_candidates([
+        *_mapping_path_candidates(current, "SPARK_SWARM_REPO"),
+        *_mapping_path_candidates(current, "SPARK_SWARM_ROOT"),
+        *_mapping_path_candidates(current, "SPARK_SWARM_RUNTIME_ROOT"),
+        *env_path_candidates("SPARK_SWARM_REPO"),
+        *env_path_candidates("SPARK_SWARM_ROOT"),
+        *env_path_candidates("SPARK_SWARM_RUNTIME_ROOT"),
+        *(candidate for candidate in [installed_path_candidate(installed, "spark-swarm")] if candidate is not None),
+    ]))
+    if swarm_root is not None:
+        bridge_src = swarm_root / "apps" / "bridge" / "src"
+        refs["SPARK_SWARM_REPO"] = str(swarm_root)
+        refs["SPARK_SWARM_ROOT"] = str(swarm_root)
+        refs["SPARK_SWARM_RUNTIME_ROOT"] = str(swarm_root)
+        if (bridge_src / "spark_swarm_bridge" / "cli.py").exists():
+            refs["SPARK_SWARM_BRIDGE_SRC"] = str(bridge_src)
+
+    explicit_bridge_src = first_existing_path(unique_path_candidates([
+        *_mapping_path_candidates(current, "SPARK_SWARM_BRIDGE_SRC"),
+        *env_path_candidates("SPARK_SWARM_BRIDGE_SRC"),
+    ]))
+    if explicit_bridge_src is not None:
+        refs["SPARK_SWARM_BRIDGE_SRC"] = str(explicit_bridge_src)
+
+    startup_bench = first_existing_path(unique_path_candidates([
+        *_mapping_path_candidates(current, "SPARK_STARTUP_BENCH_REPO"),
+        *env_path_candidates("SPARK_STARTUP_BENCH_REPO"),
+        *(candidate for candidate in [installed_path_candidate(installed, "startup-bench")] if candidate is not None),
+    ]))
+    if startup_bench is not None:
+        refs["SPARK_STARTUP_BENCH_REPO"] = str(startup_bench)
+
+    path_roots = unique_path_candidates([
+        *_specialization_path_candidates_from_values(current),
+        *_specialization_path_candidates_from_values(env_values),
+        *specialization_path_candidates(installed),
+    ])
+    usable_paths = [path for path in path_roots if path.exists() and specialization_path_is_usable(path)]
+    if usable_paths:
+        refs["SPARK_SPECIALIZATION_PATH_ROOTS"] = os.pathsep.join(str(path) for path in usable_paths)
+    for path in usable_paths:
+        refs[specialization_repo_env_var(specialization_path_key(path))] = str(path)
+    return refs
+
+
 def telegram_generated_env_paths(setup_state: dict[str, Any] | None = None) -> list[Path]:
     paths = [MODULE_CONFIG_DIR / "spark-telegram-bot.env"]
     state = setup_state if isinstance(setup_state, dict) else load_json(CONFIG_PATH, {})
@@ -5435,18 +5522,28 @@ def refresh_telegram_builder_runtime_refs(
     installed: object | None = None,
     setup_state: dict[str, Any] | None = None,
 ) -> list[Path]:
-    refs = builder_runtime_env_refs_from_installed(installed if installed is not None else load_json(REGISTRY_PATH, {}))
+    installed_records = installed if installed is not None else load_json(REGISTRY_PATH, {})
+    refs = builder_runtime_env_refs_from_installed(installed_records)
     if not refs:
         return []
     changed: list[Path] = []
-    for path in telegram_generated_env_paths(setup_state):
+    paths = telegram_generated_env_paths(setup_state)
+    existing_by_path = {path: read_generated_env(path) for path in paths if path.exists()}
+    existing_refs: dict[str, str] = {}
+    for values in existing_by_path.values():
+        existing_refs.update(values)
+    for path in paths:
         if not path.exists():
             continue
-        current = read_generated_env(path)
+        current = existing_by_path.get(path, {})
         if not current:
             continue
         next_values = dict(current)
         next_values.update(refs)
+        next_values.update(telegram_specialization_runtime_env_refs_from_installed(
+            installed_records,
+            {**existing_refs, **current},
+        ))
         if next_values != current:
             write_generated_env(path, next_values)
             changed.append(path)

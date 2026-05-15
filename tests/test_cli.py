@@ -5844,6 +5844,13 @@ class SparkCliTests(unittest.TestCase):
             module_config_dir = root / "config" / "modules"
             module_config_dir.mkdir(parents=True)
             installed_builder = root / "modules" / "spark-intelligence-builder-release" / "source"
+            swarm = root / "spark-swarm"
+            bridge_src = swarm / "apps" / "bridge" / "src" / "spark_swarm_bridge"
+            bridge_src.mkdir(parents=True)
+            (bridge_src / "cli.py").write_text("", encoding="utf-8")
+            path_root = root / "specialization-path-startup-yc"
+            path_root.mkdir()
+            (path_root / "specialization-path.json").write_text('{"pathKey":"startup-yc"}', encoding="utf-8")
             stale_builder = root / "Desktop" / "spark-intelligence-builder"
             base_env = module_config_dir / "spark-telegram-bot.env"
             profile_env = module_config_dir / "spark-telegram-bot.testerthebester.env"
@@ -5851,6 +5858,8 @@ class SparkCliTests(unittest.TestCase):
                 "\n".join(
                     [
                         f"SPARK_BUILDER_REPO={stale_builder}",
+                        f"SPARK_SWARM_ROOT={swarm}",
+                        f"SPARK_SPECIALIZATION_PATH_ROOTS={path_root}",
                         "SPARK_BUILDER_BRIDGE_MODE=optional",
                         "TELEGRAM_RELAY_PORT=8788",
                     ]
@@ -5885,6 +5894,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(refreshed_profile["SPARK_BUILDER_PYTHON"], str(Path(sys.executable)))
         self.assertEqual(refreshed_base["SPARK_BUILDER_BRIDGE_MODE"], "required")
         self.assertEqual(refreshed_profile["TELEGRAM_RELAY_PORT"], "8791")
+        self.assertEqual(refreshed_base["SPARK_SWARM_REPO"], str(swarm))
+        self.assertEqual(refreshed_profile["SPARK_SWARM_BRIDGE_SRC"], str(swarm / "apps" / "bridge" / "src"))
+        self.assertEqual(refreshed_base["SPARK_SWARM_SPECIALIZATION_PATH_STARTUP_YC_REPO"], str(path_root))
 
     def test_build_module_envs_routes_telegram_secret_only_to_gateway(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
