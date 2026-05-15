@@ -54,6 +54,9 @@ function Apply-InstallDefaults {
         $script:NoAutostart = $true
         $Script:AutostartAutoDisabled = $true
     }
+    if ($Yes -or [Console]::IsInputRedirected) {
+        $script:NonInteractiveSetup = $true
+    }
 }
 
 function Test-BundleIncludesVoice {

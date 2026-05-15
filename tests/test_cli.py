@@ -11091,6 +11091,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("checkout_cli_ref", script)
         self.assertIn("SPARK_AUTOSTART_USER_SET=0", script)
         self.assertIn("SPARK_AUTOSTART_AUTO_DISABLED=0", script)
+        self.assertIn('SPARK_NON_INTERACTIVE_SETUP=1', script)
         self.assertIn("bundle_includes_voice", script)
         self.assertIn("autostart_plan_label", script)
         self.assertIn("installer_run_mode_label", script)
@@ -11161,7 +11162,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Voice included:      yes", result.stdout)
         self.assertIn("Run mode:            unattended (non-TTY stdin)", result.stdout)
         self.assertIn("Autostart:           no; auto-disabled for --yes/non-interactive run", result.stdout)
-        self.assertIn("--no-start-now --no-autostart", result.stdout)
+        self.assertIn("--no-start-now --no-autostart --non-interactive", result.stdout)
         self.assertNotIn("--start-now --autostart", result.stdout)
 
     def test_windows_install_script_bootstraps_local_prefix_contract(self) -> None:
@@ -11198,6 +11199,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("[switch]$AllowDevSource", script)
         self.assertIn("[switch]$Autostart", script)
         self.assertIn("Apply-InstallDefaults", script)
+        self.assertIn('$script:NonInteractiveSetup = $true', script)
         self.assertIn("Test-BundleIncludesVoice", script)
         self.assertIn("Format-AutostartPlan", script)
         self.assertIn("Format-InstallerRunMode", script)

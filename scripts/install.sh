@@ -177,6 +177,9 @@ if [ "$SPARK_AUTOSTART_USER_SET" = "0" ] && { [ "$SPARK_ASSUME_YES" = "1" ] || [
   SPARK_AUTOSTART=0
   SPARK_AUTOSTART_AUTO_DISABLED=1
 fi
+if [ "$SPARK_ASSUME_YES" = "1" ] || [ ! -t 0 ]; then
+  SPARK_NON_INTERACTIVE_SETUP=1
+fi
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
