@@ -105,6 +105,7 @@ from spark_cli.cli import (
     path_is_write_denied,
     provider_env_blocklist,
     primary_telegram_profile,
+    telegram_profile_relay_port,
     require_write_allowed,
     check_runtime_version_for_module,
     clear_install_progress,
@@ -2539,6 +2540,17 @@ class SparkCliTests(unittest.TestCase):
 
     def test_primary_telegram_profile_defaults_to_neutral_primary_profile(self) -> None:
         self.assertEqual(primary_telegram_profile({}), "primary")
+
+    def test_telegram_profile_relay_port_uses_named_profile_port(self) -> None:
+        setup_state = {
+            "primary_telegram_profile": "spark-agi",
+            "telegram_profiles": {
+                "spark-agi": {"relay_port": 8789},
+                "testerthebester": {"relay_port": 8788},
+            },
+        }
+        self.assertEqual(telegram_profile_relay_port(setup_state, "spark-agi"), 8789)
+        self.assertEqual(telegram_profile_relay_port(setup_state, "missing"), 8788)
 
     def test_next_telegram_profile_relay_port_skips_existing_ports(self) -> None:
         setup_state = {"telegram_profiles": {"qa": {"relay_port": 8789}, "agi": {"relay_port": "8790"}}}
@@ -5980,6 +5992,39 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(envs["spawner-ui"]["SPARK_WORKSPACE_ROOT"], str(SPARK_HOME / "workspaces"))
         self.assertEqual(envs["spawner-ui"]["SPAWNER_STATE_DIR"], str(STATE_DIR / "spawner-ui"))
         self.assertNotIn("TELEGRAM_WEBHOOK_SECRET", envs["spark-telegram-bot"])
+
+    def test_build_module_envs_keeps_primary_telegram_profile_and_port_coherent(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        spawner = make_module("spawner-ui", ["mission.execution"])
+
+        class Args:
+            spawner_ui_url = "http://127.0.0.1:3333"
+            telegram_relay_secret = None
+
+        setup_state = {
+            "primary_telegram_profile": "spark-agi",
+            "telegram_profiles": {
+                "spark-agi": {"relay_port": 8789},
+                "testerthebester": {"relay_port": 8788},
+            },
+        }
+        with patch("spark_cli.cli.load_json", return_value=setup_state):
+            envs = build_module_envs(
+                Args(),
+                {
+                    gateway.name: gateway,
+                    builder.name: builder,
+                    spawner.name: spawner,
+                },
+                {
+                    "telegram.bot_token": "abc",
+                    "telegram.admin_ids": "123",
+                },
+            )
+
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_TELEGRAM_PROFILE"], "spark-agi")
+        self.assertEqual(envs["spark-telegram-bot"]["TELEGRAM_RELAY_PORT"], "8789")
 
     def test_build_module_envs_persists_specialization_loop_roots_to_telegram(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
