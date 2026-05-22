@@ -23,7 +23,16 @@ second code-scanning feed.
 | #26 | CodeQL | `py/clear-text-storage-sensitive-data` | False positive after source review. The secret file backend stores DPAPI-protected values on Windows and is disabled on non-Windows unless explicitly opted into for disposable tests. |
 | #27 | CodeQL | `py/clear-text-storage-sensitive-data` | Used in tests. The fixture writes manifest secret IDs, not live secret values. |
 | #31 | Scorecard | `TokenPermissionsID` | Fixed in workflow YAML by moving write permission to the CodeQL job. |
-| #32-#50 | Scorecard | Various | Treat as Scorecard workflow findings, not code-scanning alerts. Some are accepted tradeoffs for this competition phase, such as replacing GitHub PR review with `spark-jury-approval`. |
+| #32, #34 | Scorecard | `PinnedDependenciesID` | Existing Docker Python base images are not digest-pinned. Track through the Scorecard workflow result instead of code scanning. |
+| #33 | Scorecard | `PinnedDependenciesID` | Existing Docker Node base image is not digest-pinned. Track through the Scorecard workflow result instead of code scanning. |
+| #35-#38, #40-#44 | Scorecard | `PinnedDependenciesID` | Existing Docker/CI pip install commands are not hash-pinned. Track through the Scorecard workflow result instead of code scanning. |
+| #39 | Scorecard | `PinnedDependenciesID` | Existing Docker npm global install is not hash-pinned. Track through the Scorecard workflow result instead of code scanning. |
+| #45 | Scorecard | `CodeReviewID` | Accepted competition-system tradeoff: GitHub PR review is replaced by required `spark-jury-approval` plus CI gates. |
+| #46 | Scorecard | `MaintainedID` | Accepted repository-age signal. The repository was created within 90 days; not a merge blocker by itself. |
+| #47 | Scorecard | `SecurityPolicyID` | Addressed by adding a private vulnerability reporting path to `SECURITY.md` and enabling GitHub private vulnerability reporting for the repository. |
+| #48 | Scorecard | `CIIBestPracticesID` | Accepted phased hardening item. OpenSSF Best Practices badge work is outside this immediate code-scanning cleanup. |
+| #49 | Scorecard | `SASTID` | Existing history signal. CodeQL is now a required `master` and PR gate; old unchecked commits do not block this cleanup. |
+| #50 | Scorecard | `FuzzingID` | Accepted phased hardening item. Fuzzing is not yet part of the Spark CLI gate and should be tracked separately. |
 
 ## Follow-Up Rules
 
