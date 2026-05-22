@@ -200,7 +200,8 @@ def modal_smoke_script() -> str:
             if sandbox is not None:
                 try:
                     sandbox.terminate()
-                except Exception:
+                except Exception as _exc:
+                    import logging as _logging; _logging.getLogger(__name__).warning("Unexpected error: %s", _exc)
                     pass
                 try:
                     sandbox.detach()
