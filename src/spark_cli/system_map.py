@@ -869,7 +869,8 @@ def inspect_spawner_prd_auto_trace(path: Path, *, builder_home: Path) -> dict[st
                         continue
                     try:
                         payload = json.loads(line)
-                    except Exception:
+                    except Exception as _exc:
+                        import logging as _logging; _logging.getLogger(__name__).warning("Unexpected error: %s", _exc)
                         continue
                     if not isinstance(payload, dict):
                         continue
