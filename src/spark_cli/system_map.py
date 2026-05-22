@@ -1839,7 +1839,8 @@ def inspect_labs_creator_surface(repo_path: Path) -> dict[str, Any] | None:
                 for label, rel_path in LABS_CREATOR_RUN_ARTIFACTS.items():
                     if (run_dir / rel_path).exists():
                         artifact_counts[label] += 1
-        except Exception:
+        except Exception as _exc:
+            import logging as _logging; _logging.getLogger(__name__).warning("Unexpected error: %s", _exc)
             pass
 
     return {
