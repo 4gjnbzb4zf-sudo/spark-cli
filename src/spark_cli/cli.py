@@ -1032,7 +1032,8 @@ def store_secret(secret_id: str, value: str, preferred: str = "keychain") -> str
             index[secret_id] = "keychain"
             save_secrets_index(index)
             return "keychain"
-        except Exception:
+        except Exception as _exc:
+            import logging as _logging; _logging.getLogger(__name__).warning("Unexpected error: %s", _exc)
             pass
     file_secrets = load_json(SECRETS_FILE_PATH, {})
     file_secrets[secret_id] = dpapi_protect(value)
