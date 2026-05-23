@@ -381,7 +381,7 @@ If you are an LLM agent installing Spark for a user:
 6. Never print or commit bot tokens, provider API keys, `.env`, `.env.*`, or `~/.spark/config/secrets.local.json`.
 7. Confirm Telegram's generated env points at Builder with `SPARK_BUILDER_HOME`, and confirm Builder has memory enabled with `domain-chip-memory` active.
 8. If `/remember` replies with `Working Memory`, generic memory text, or a false success while recall fails, rerun `spark setup`, restart `spark-telegram-bot`, then inspect Builder memory state before editing bot code. The launch starter should fail visibly if Builder is unreachable, not silently fall back.
-9. If a module fails healthcheck, read `spark status` repair hints before editing code.
+9. If a trusted module healthcheck or `spark status` repair hint asks for a Node module command such as `npm run health:polling`, run it from `~/.spark/modules/<name>/source/`, not from the module parent directory. Do not run module-provided scripts from untrusted branches or unreviewed modules outside Spark's approved healthcheck/repair flow.
 10. Do not add the deferred dashboard/port `8787` path back into launch onboarding.
 
 ## Commands
