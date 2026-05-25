@@ -739,6 +739,33 @@ function Run-Autostart {
     Write-SparkLog "Spark startup was handled by setup"
 }
 
+function Show-InstallOutcome {
+    $pendingSetupPath = Join-Path $Script:SparkPrefix "state\setup.pending.json"
+    if ($SkipSetup) {
+        $setupLine = "[SKIP] Setup: skipped by request"
+        $runtimeLine = "[MANUAL] Runtime: start after setup"
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding after setup"
+    } elseif (Test-Path -LiteralPath $pendingSetupPath) {
+        $setupLine = "[PAUSED] Setup: refresh paused; run spark doctor"
+        $runtimeLine = "[MANUAL] Runtime: existing setup can keep running; resume setup before changing secrets"
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding"
+    } else {
+        $setupLine = "[OK] Setup: configured"
+        if ($NoAutostart) {
+            $runtimeLine = "[MANUAL] Runtime: start after setup"
+        } else {
+            $runtimeLine = "[STARTED] Runtime: setup handled start/autostart"
+        }
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding"
+    }
+    Write-Host ""
+    Write-Host "Install outcome:"
+    Write-Host "  [OK] CLI: installed or updated"
+    Write-Host "  $setupLine"
+    Write-Host "  $runtimeLine"
+    Write-Host "  $telegramLine"
+}
+
 function Invoke-Install {
     $Script:SparkPrefix = Resolve-FullPath $Prefix
     Apply-InstallDefaults
@@ -787,6 +814,7 @@ function Invoke-Install {
     Write-Host ""
     Write-Host "Install log:"
     Write-Host "  $Script:InstallLogPath"
+    Show-InstallOutcome
     Write-Host ""
     if ($SkipSetup) {
         Write-Host "Setup was skipped."

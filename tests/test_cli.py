@@ -9919,10 +9919,23 @@ class SparkCliTests(unittest.TestCase):
             raise AssertionError(url)
 
         with patch("spark_cli.cli.current_git_commit", return_value=source["ref"]), \
+             patch("spark_cli.cli.timestamp_now", return_value="2026-05-25T06:30:00Z"), \
              patch("spark_cli.cli.urllib.request.urlopen", side_effect=fake_urlopen):
             payload = collect_installer_integrity_payload(hosted=True)
 
         self.assertTrue(payload["ok"])
+        self.assertEqual(
+            payload["hosted_release"],
+            {
+                "release": source["releaseName"],
+                "commit": source["ref"],
+                "expected_release": source["releaseName"],
+                "expected_commit": source["ref"],
+                "source_basis": "committed_manifest",
+                "verified_at": "2026-05-25T06:30:00Z",
+                "fresh": True,
+            },
+        )
         checks = {check["name"]: check for check in payload["checks"]}
         self.assertEqual(checks["hosted_install.sh"]["expected_sha256"], hosted_hashes["install.sh"])
         self.assertEqual(checks["hosted_install.sh"]["hosted_metadata_sha256"], hosted_hashes["install.sh"])
@@ -10324,6 +10337,32 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(args.func(args), 0)
         collect_mock.assert_called_once_with(hosted=False)
         self.assertIn("local_install.sh", stdout.getvalue())
+
+    def test_verify_hosted_installers_plain_prints_release_freshness(self) -> None:
+        args = build_parser().parse_args(["verify", "--installers", "--hosted-installers"])
+        payload = {
+            "ok": True,
+            "summary": "Spark installer integrity verification",
+            "manifest": "scripts/installer-manifest.json",
+            "hosted_release": {
+                "release": "spark-cli-public-installer-r16",
+                "commit": "abc123",
+                "expected_release": "spark-cli-public-installer-r16",
+                "expected_commit": "abc123",
+                "source_basis": "committed_manifest",
+                "verified_at": "2026-05-25T06:30:00Z",
+                "fresh": True,
+            },
+            "checks": [{"name": "hosted_release_manifest", "ok": True, "detail": "ready"}],
+        }
+        with patch("spark_cli.cli.collect_installer_integrity_payload", return_value=payload) as collect_mock, \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(args.func(args), 0)
+        collect_mock.assert_called_once_with(hosted=True)
+        output = stdout.getvalue()
+        self.assertIn("Hosted release freshness:", output)
+        self.assertIn("[OK] published: spark-cli-public-installer-r16 @ abc123", output)
+        self.assertIn("verified: 2026-05-25T06:30:00Z", output)
 
     def test_verify_hosted_reports_security_payload(self) -> None:
         args = build_parser().parse_args(["verify", "--hosted", "--json"])
@@ -11446,6 +11485,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("$SPARK_PREFIX/bin/spark fix telegram", script)
         self.assertIn("$SPARK_PREFIX/bin/spark fix spawner", script)
         self.assertIn("$SPARK_PREFIX/bin/spark fix autostart", script)
+        self.assertIn("print_install_outcome", script)
+        self.assertIn("Install outcome:", script)
+        self.assertIn("[OK] CLI: installed or updated", script)
+        self.assertIn("[OK] Setup: configured", script)
+        self.assertIn("[SKIP] Setup: skipped by request", script)
+        self.assertIn("[PAUSED] Setup: refresh paused; run spark doctor", script)
+        self.assertIn("[STARTED] Runtime: setup handled start/autostart", script)
+        self.assertIn("[MANUAL] Runtime: start after setup", script)
+        self.assertIn("[VERIFY] Telegram: run spark verify --onboarding", script)
         self.assertIn("choose Level 4", script)
         self.assertIn("Use a lower level only", script)
         self.assertIn("Mission Control, Kanban, Canvas, or preview links", script)
@@ -11554,6 +11602,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark fix telegram", script)
         self.assertIn("spark fix spawner", script)
         self.assertIn("spark fix autostart", script)
+        self.assertIn("Show-InstallOutcome", script)
+        self.assertIn("Install outcome:", script)
+        self.assertIn("[OK] CLI: installed or updated", script)
+        self.assertIn("[OK] Setup: configured", script)
+        self.assertIn("[SKIP] Setup: skipped by request", script)
+        self.assertIn("[PAUSED] Setup: refresh paused; run spark doctor", script)
+        self.assertIn("[STARTED] Runtime: setup handled start/autostart", script)
+        self.assertIn("[MANUAL] Runtime: start after setup", script)
+        self.assertIn("[VERIFY] Telegram: run spark verify --onboarding", script)
         self.assertIn("choose Level 4", script)
         self.assertIn("Use a lower level only", script)
         self.assertIn("Mission Control, Kanban, Canvas, or preview links", script)

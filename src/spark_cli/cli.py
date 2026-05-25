@@ -1648,16 +1648,35 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     "detail": f"Could not fetch hosted command metadata: {exc}",
                 }
             )
+    hosted_release: dict[str, Any] | None = None
+    if hosted:
+        hosted_release = {
+            "release": hosted_release_name,
+            "commit": hosted_release_ref,
+            "expected_release": expected_hosted_release,
+            "expected_commit": expected_hosted_ref,
+            "source_basis": hosted_source_basis,
+            "verified_at": timestamp_now(),
+            "fresh": bool(
+                hosted_release_name
+                and hosted_release_ref
+                and hosted_release_name == expected_hosted_release
+                and hosted_release_ref == expected_hosted_ref
+            ),
+        }
     try:
         manifest_label = str(INSTALLER_MANIFEST_PATH.relative_to(REPO_ROOT)).replace("\\", "/")
     except ValueError:
         manifest_label = str(INSTALLER_MANIFEST_PATH)
-    return {
+    payload: dict[str, Any] = {
         "ok": all(check["ok"] for check in checks),
         "summary": "Spark installer integrity verification",
         "manifest": manifest_label,
         "checks": checks,
     }
+    if hosted_release is not None:
+        payload["hosted_release"] = hosted_release
+    return payload
 
 
 def collect_module_provenance_payload(
@@ -11976,6 +11995,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(json.dumps(payload, indent=2))
             return 0 if payload["ok"] else 1
         print(payload["summary"])
+        hosted_release = payload.get("hosted_release")
+        if isinstance(hosted_release, dict):
+            marker = "[OK]" if hosted_release.get("fresh") else "[FIX]"
+            release = hosted_release.get("release") or "<unknown release>"
+            commit = hosted_release.get("commit") or "<unknown commit>"
+            print("Hosted release freshness:")
+            print(f"{marker} published: {release} @ {commit}")
+            print(f"      verified: {hosted_release.get('verified_at') or '<unknown time>'}")
+            print(f"      expected: {hosted_release.get('expected_release') or '<unknown release>'} @ {hosted_release.get('expected_commit') or '<unknown commit>'}")
         for check in payload["checks"]:
             marker = "[OK]" if check["ok"] else "[FIX]"
             print(f"{marker} {check['name']}: {check['detail']}")

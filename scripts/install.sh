@@ -994,6 +994,35 @@ run_autostart() {
   log "Spark startup was handled by setup"
 }
 
+print_install_outcome() {
+  local setup_line runtime_line telegram_line
+  if [ "$SPARK_SKIP_SETUP" = "1" ]; then
+    setup_line="[SKIP] Setup: skipped by request"
+    runtime_line="[MANUAL] Runtime: start after setup"
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding after setup"
+  elif [ -f "$SPARK_PREFIX/state/setup.pending.json" ]; then
+    setup_line="[PAUSED] Setup: refresh paused; run spark doctor"
+    runtime_line="[MANUAL] Runtime: existing setup can keep running; resume setup before changing secrets"
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding"
+  else
+    setup_line="[OK] Setup: configured"
+    if [ "$SPARK_AUTOSTART" = "1" ]; then
+      runtime_line="[STARTED] Runtime: setup handled start/autostart"
+    else
+      runtime_line="[MANUAL] Runtime: start after setup"
+    fi
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding"
+  fi
+  cat <<EOF
+
+Install outcome:
+  [OK] CLI: installed or updated
+  $setup_line
+  $runtime_line
+  $telegram_line
+EOF
+}
+
 main() {
   normalize_macos_locale
   SPARK_PREFIX="$(normalize_path "$SPARK_PREFIX")"
@@ -1043,6 +1072,7 @@ For default installs, the installer also adds this line to your shell profile:
 Install log:
   $SPARK_INSTALL_LOG
 EOF
+  print_install_outcome
   if [ "$SPARK_SKIP_SETUP" = "1" ]; then
     cat <<EOF
 
