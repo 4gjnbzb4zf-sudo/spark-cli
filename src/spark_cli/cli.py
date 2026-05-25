@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import ctypes
 import getpass
 import hashlib
+import importlib.util
 import io
 import ipaddress
 import json
@@ -98,6 +100,21 @@ DEFAULT_GRAPHITI_KUZU_DB_PATH = "{home}/sidecars/graphiti/kuzu/graphiti.kuzu"
 DEFAULT_GRAPHITI_GROUP_ID = "spark-memory"
 VOICE_MODULE_NAME = "spark-voice-comms"
 TELEGRAM_VOICE_BUNDLE = "telegram-voice-starter"
+BROWSER_USE_STATUS_DIR = STATE_DIR / "browser-use"
+BROWSER_USE_STATUS_PATH = BROWSER_USE_STATUS_DIR / "status.json"
+BROWSER_USE_PROBE_SESSION = "spark-probe"
+BROWSER_USE_PROBE_URL = "https://example.com"
+BROWSER_USE_PROOF_TTL_SECONDS = 15 * 60
+BROWSER_USE_REQUIRED_PROOFS = {"doctor", "public_page_open", "screenshot_capture", "state_read"}
+BROWSER_USE_ACTION_TEXT_LIMIT = 1800
+BROWSER_USE_TASK_TEXT_LIMIT = 2600
+BROWSER_USE_AGENT_SYSTEM_NUDGE = (
+    "Spark wrapper instruction: every assistant response in the browser-use loop must use the "
+    "available action schema only. Do not answer with plain prose during intermediate steps. "
+    "When the requested browser work is complete, call the done action with a concise answer "
+    "grounded only in observed browser state."
+)
+BROWSER_USE_AGENT_LLM_SCREENSHOT_SIZE = (1400, 850)
 SAFE_PARENT_ENV_KEYS = {
     "APPDATA",
     "COMSPEC",
@@ -5425,6 +5442,842 @@ def install_memory_sidecar_dependencies(
     install_target = f"{memory.path}[graphiti-kuzu]"
     print("Installing optional Graphiti/Kuzu memory sidecar extra for domain-chip-memory...")
     subprocess.run([sys.executable, "-m", "pip", "install", "-e", install_target], check=True)
+
+
+def browser_use_cli_path() -> str | None:
+    discovered = shutil.which("browser-use") or shutil.which("browser_use")
+    if discovered:
+        return discovered
+    executable_dir = Path(sys.executable).resolve().parent
+    for name in ("browser-use.exe", "browser_use.exe", "browser-use", "browser_use"):
+        candidate = executable_dir / name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def browser_use_package_available() -> bool:
+    return importlib.util.find_spec("browser_use") is not None
+
+
+def browser_use_status_file_payload() -> dict[str, Any]:
+    if not BROWSER_USE_STATUS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(BROWSER_USE_STATUS_PATH.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "error",
+            "last_failure_reason": f"could not read browser-use status file: {exc}",
+        }
+    return data if isinstance(data, dict) else {"status": "error", "last_failure_reason": "browser-use status file is not a JSON object"}
+
+
+def browser_use_status_payload() -> dict[str, Any]:
+    cli_path = browser_use_cli_path()
+    package_available = browser_use_package_available()
+    status_doc = browser_use_status_file_payload()
+    raw_status = str(status_doc.get("status") or status_doc.get("state") or "").strip().lower()
+    proofs = [str(item) for item in (status_doc.get("proofs") or []) if str(item).strip()]
+    proof_set = set(proofs)
+    proof_fresh = browser_use_proof_is_fresh(status_doc)
+    proof_complete = BROWSER_USE_REQUIRED_PROOFS.issubset(proof_set)
+    screenshot_ok = browser_use_screenshot_ok(status_doc)
+    ready_signal = raw_status in {"ready", "running", "healthy", "available", "ok", "success", "completed"} or status_doc.get("ready") is True
+    ready = ready_signal and proof_complete and proof_fresh and screenshot_ok
+    failed = raw_status in {"failed", "failure", "error", "unavailable", "degraded"} or status_doc.get("ready") is False
+    if ready:
+        status = "ready"
+    elif failed:
+        status = "failed"
+    elif package_available or cli_path:
+        status = "installed_unproven"
+    else:
+        status = "missing"
+    stale_or_incomplete_reason = browser_use_status_receipt_problem(
+        ready_signal=ready_signal,
+        proof_complete=proof_complete,
+        proof_fresh=proof_fresh,
+        screenshot_ok=screenshot_ok,
+        proofs=proofs,
+    )
+    return {
+        "ok": status == "ready",
+        "status": status,
+        "package_available": package_available,
+        "cli_available": bool(cli_path),
+        "cli_path": public_local_path_ref(cli_path) if cli_path else "",
+        "status_path": public_local_path_ref(BROWSER_USE_STATUS_PATH),
+        "status_exists": BROWSER_USE_STATUS_PATH.exists(),
+        "last_success_at": str(status_doc.get("last_success_at") or ""),
+        "last_failure_at": str(status_doc.get("last_failure_at") or ""),
+        "last_failure_reason": str(status_doc.get("last_failure_reason") or status_doc.get("error_message") or stale_or_incomplete_reason),
+        "proofs": proofs,
+        "proof_fresh": proof_fresh,
+        "required_proofs": sorted(BROWSER_USE_REQUIRED_PROOFS),
+        "proven_scope": browser_use_proven_scope(proofs),
+        "unproven_scope": [
+            "logged-in pages",
+            "cookies/profile reuse",
+            "sensitive click workflows",
+            "arbitrary site workflows",
+            "Spawner browser automation",
+        ],
+        "next_action": browser_use_next_action(status),
+    }
+
+
+def browser_use_proof_is_fresh(status_doc: dict[str, Any]) -> bool:
+    timestamp = str(status_doc.get("last_success_at") or status_doc.get("recorded_at") or status_doc.get("checked_at") or "").strip()
+    if not timestamp:
+        return False
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() <= BROWSER_USE_PROOF_TTL_SECONDS
+
+
+def browser_use_screenshot_ok(status_doc: dict[str, Any]) -> bool:
+    screenshot = str(status_doc.get("screenshot_path") or status_doc.get("screenshot") or "").strip()
+    proofs = status_doc.get("proofs") if isinstance(status_doc.get("proofs"), dict) else {}
+    screenshot_proof = proofs.get("screenshot_capture") if isinstance(proofs, dict) else {}
+    if not screenshot and isinstance(screenshot_proof, dict):
+        screenshot = str(screenshot_proof.get("path") or screenshot_proof.get("screenshot_path") or "").strip()
+    if not screenshot:
+        return "screenshot_capture" not in {str(item) for item in (status_doc.get("proofs") or [])}
+    return Path(screenshot).expanduser().exists()
+
+
+def browser_use_status_receipt_problem(
+    *,
+    ready_signal: bool,
+    proof_complete: bool,
+    proof_fresh: bool,
+    screenshot_ok: bool,
+    proofs: list[str],
+) -> str:
+    if not ready_signal:
+        return ""
+    if not proof_complete:
+        missing = sorted(BROWSER_USE_REQUIRED_PROOFS.difference(set(proofs)))
+        return "browser-use status is ready, but proof receipt is incomplete: missing " + ", ".join(missing)
+    if not proof_fresh:
+        return "browser-use proof receipt is stale; rerun `spark browser-use probe`."
+    if not screenshot_ok:
+        return "browser-use screenshot proof artifact is missing."
+    return ""
+
+
+def browser_use_proven_scope(proofs: Iterable[str]) -> list[str]:
+    proof_set = {str(item).strip() for item in proofs if str(item).strip()}
+    scope: list[str] = []
+    if "doctor" in proof_set:
+        scope.append("browser-use doctor")
+    if "public_page_open" in proof_set:
+        scope.append("public page open")
+    if "state_read" in proof_set:
+        scope.append("page state read")
+    if "screenshot_capture" in proof_set:
+        scope.append("screenshot capture")
+    return scope
+
+
+def browser_use_next_action(status: str) -> str:
+    if status == "ready":
+        return "Run /probe browser in Telegram before claiming a specific browser task worked this turn."
+    if status == "installed_unproven":
+        return "Run `spark browser-use probe` to create a fresh proof receipt."
+    if status == "failed":
+        return "Run `spark browser-use probe --json` and inspect last_failure_reason."
+    return "Run `spark browser-use install`, then `spark browser-use probe`."
+
+
+def write_browser_use_status(payload: dict[str, Any]) -> None:
+    BROWSER_USE_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(BROWSER_USE_STATUS_PATH, payload)
+
+
+def run_browser_use_command(cli_path: str, *parts: str, timeout: int = 45) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return subprocess.run(
+        [cli_path, *parts],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+        env=env,
+    )
+
+
+def browser_use_probe_payload() -> dict[str, Any]:
+    cli_path = browser_use_cli_path()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    base_payload: dict[str, Any] = {
+        "backend_kind": "browser_use_adapter",
+        "status_path": str(BROWSER_USE_STATUS_PATH),
+        "package_available": browser_use_package_available(),
+        "cli_available": bool(cli_path),
+        "cli_path": cli_path or "",
+        "checked_at": now,
+        "proofs": [],
+    }
+    if not cli_path:
+        failure = "browser-use CLI is not on PATH."
+        payload = {
+            **base_payload,
+            "status": "failed",
+            "ready": False,
+            "last_failure_at": now,
+            "last_failure_reason": failure,
+        }
+        write_browser_use_status(payload)
+        return payload
+
+    screenshot_path = BROWSER_USE_STATUS_DIR / "probe-screenshot.png"
+    proofs: list[str] = []
+    try:
+        run_browser_use_command(cli_path, "doctor", timeout=60)
+        proofs.append("doctor")
+        run_browser_use_command(cli_path, "--session", BROWSER_USE_PROBE_SESSION, "open", BROWSER_USE_PROBE_URL, timeout=90)
+        proofs.append("public_page_open")
+        run_browser_use_command(cli_path, "--session", BROWSER_USE_PROBE_SESSION, "state", timeout=45)
+        proofs.append("state_read")
+        run_browser_use_command(cli_path, "--session", BROWSER_USE_PROBE_SESSION, "screenshot", str(screenshot_path), timeout=60)
+        proofs.append("screenshot_capture")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        failure = browser_use_command_failure_message(exc)
+        payload = {
+            **base_payload,
+            "status": "failed",
+            "ready": False,
+            "proofs": proofs,
+            "last_failure_at": now,
+            "last_failure_reason": failure,
+        }
+        write_browser_use_status(payload)
+        return payload
+    finally:
+        if cli_path:
+            env = dict(os.environ)
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
+            subprocess.run(
+                [cli_path, "--session", BROWSER_USE_PROBE_SESSION, "close"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+                env=env,
+            )
+
+    payload = {
+        **base_payload,
+        "status": "ready",
+        "ready": True,
+        "last_success_at": now,
+        "proofs": proofs,
+        "probe_url": BROWSER_USE_PROBE_URL,
+        "screenshot_path": str(screenshot_path),
+    }
+    write_browser_use_status(payload)
+    return payload
+
+
+def browser_use_public_url(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if not value:
+        raise ValueError("Browser URL is required.")
+    if "://" not in value:
+        value = f"https://{value}"
+    errors = validate_url_safety(
+        value,
+        label="Browser URL",
+        policy=UrlPolicy(allow_local=True, allow_private_networks=True, require_https_for_remote=False),
+    )
+    if errors:
+        raise ValueError(" ".join(errors))
+    parsed = urllib.parse.urlparse(value)
+    return urllib.parse.urlunparse(parsed)
+
+
+def browser_use_action_payload(raw_url: str, *, screenshot: bool = False) -> dict[str, Any]:
+    cli_path = browser_use_cli_path()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        url = browser_use_public_url(raw_url)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "action": "screenshot" if screenshot else "open",
+            "url": str(raw_url or "").strip(),
+            "checked_at": now,
+            "last_failure_reason": str(exc),
+        }
+    base_payload: dict[str, Any] = {
+        "backend_kind": "browser_use_adapter",
+        "action": "screenshot" if screenshot else "open",
+        "url": url,
+        "checked_at": now,
+        "package_available": browser_use_package_available(),
+        "cli_available": bool(cli_path),
+        "cli_path": cli_path or "",
+    }
+    if not cli_path:
+        return {
+            **base_payload,
+            "ok": False,
+            "status": "failed",
+            "last_failure_reason": "browser-use CLI is not on PATH.",
+        }
+
+    session = "spark-browser-" + hashlib.sha256(f"{url}:{now}".encode("utf-8")).hexdigest()[:12]
+    receipt_path = BROWSER_USE_STATUS_DIR / "actions" / f"{session}.json"
+    screenshot_path = BROWSER_USE_STATUS_DIR / "actions" / f"{session}.png"
+    proofs: list[str] = []
+    try:
+        run_browser_use_command(cli_path, "--session", session, "open", url, timeout=90)
+        proofs.append("public_url_open")
+        state = run_browser_use_command(cli_path, "--session", session, "state", timeout=45)
+        proofs.append("state_read")
+        page = browser_use_page_summary(cli_path, session)
+        if screenshot:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            run_browser_use_command(cli_path, "--session", session, "screenshot", str(screenshot_path), timeout=60)
+            proofs.append("screenshot_capture")
+        payload = {
+            **base_payload,
+            "ok": True,
+            "status": "ready",
+            "session": session,
+            "last_success_at": now,
+            "proofs": proofs,
+            "final_url": str(page.get("url") or url),
+            "title": str(page.get("title") or ""),
+            "text_excerpt": browser_use_bounded_text(str(page.get("text") or "")),
+            "state_excerpt": browser_use_bounded_text(state.stdout),
+            "screenshot_path": str(screenshot_path) if screenshot else "",
+            "receipt_path": str(receipt_path),
+            "proven_scope": browser_use_action_scope(proofs),
+            "unproven_scope": [
+                "logged-in pages",
+                "cookies/profile reuse",
+                "sensitive click workflows",
+            ],
+        }
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(receipt_path, payload)
+        return payload
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        payload = {
+            **base_payload,
+            "ok": False,
+            "status": "failed",
+            "session": session,
+            "last_failure_at": now,
+            "last_failure_reason": browser_use_command_failure_message(exc),
+            "proofs": proofs,
+            "receipt_path": str(receipt_path),
+        }
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(receipt_path, payload)
+        return payload
+    finally:
+        env = dict(os.environ)
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
+        subprocess.run(
+            [cli_path, "--session", session, "close"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            env=env,
+        )
+
+
+def browser_use_page_summary(cli_path: str, session: str) -> dict[str, str]:
+    script = "JSON.stringify({title:document.title,url:location.href,text:document.body.innerText.slice(0,2000)})"
+    result = run_browser_use_command(cli_path, "--session", session, "eval", script, timeout=45)
+    raw = result.stdout.strip()
+    if raw.lower().startswith("result:"):
+        raw = raw.split(":", 1)[1].strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"title": "", "url": "", "text": ""}
+    if not isinstance(parsed, dict):
+        return {"title": "", "url": "", "text": ""}
+    return {
+        "title": str(parsed.get("title") or ""),
+        "url": str(parsed.get("url") or ""),
+        "text": str(parsed.get("text") or ""),
+    }
+
+
+def browser_use_bounded_text(value: str, limit: int = BROWSER_USE_ACTION_TEXT_LIMIT) -> str:
+    compact = re.sub(r"\s+\n", "\n", str(value or "")).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 20)].rstrip() + "\n[truncated]"
+
+
+def browser_use_action_scope(proofs: Iterable[str]) -> list[str]:
+    proof_set = {str(item).strip() for item in proofs if str(item).strip()}
+    scope: list[str] = []
+    if "public_url_open" in proof_set:
+        scope.append("public URL open")
+    if "state_read" in proof_set:
+        scope.append("page state read")
+    if "screenshot_capture" in proof_set:
+        scope.append("screenshot capture")
+    return scope
+
+
+def browser_use_task_payload(goal: str, *, start_url: str = "", max_steps: int = 25) -> dict[str, Any]:
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    cleaned_goal = str(goal or "").strip()
+    if not cleaned_goal:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "action": "task",
+            "checked_at": now,
+            "last_failure_reason": "Browser-use task is required.",
+        }
+    try:
+        url = browser_use_public_url(start_url) if str(start_url or "").strip() else ""
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "action": "task",
+            "checked_at": now,
+            "url": str(start_url or "").strip(),
+            "task": cleaned_goal,
+            "last_failure_reason": str(exc),
+        }
+    try:
+        steps = max(1, min(int(max_steps), 100))
+    except (TypeError, ValueError):
+        steps = 25
+
+    session = "spark-browser-task-" + hashlib.sha256(f"{cleaned_goal}:{url}:{now}".encode("utf-8")).hexdigest()[:12]
+    task_dir = BROWSER_USE_STATUS_DIR / "tasks"
+    receipt_path = task_dir / f"{session}.json"
+    history_path = task_dir / f"{session}-history.json"
+    base_payload: dict[str, Any] = {
+        "backend_kind": "browser_use_agent",
+        "action": "task",
+        "checked_at": now,
+        "session": session,
+        "task": cleaned_goal,
+        "url": url,
+        "max_steps": steps,
+        "package_available": browser_use_package_available(),
+        "cli_available": bool(browser_use_cli_path()),
+        "cli_path": browser_use_cli_path() or "",
+        "receipt_path": str(receipt_path),
+        "history_path": str(history_path),
+    }
+    if not browser_use_package_available():
+        return {
+            **base_payload,
+            "ok": False,
+            "status": "failed",
+            "last_failure_reason": "browser-use Python package is not installed. Run `spark browser-use install`.",
+        }
+
+    task_dir.mkdir(parents=True, exist_ok=True)
+    start_page: dict[str, Any] = {}
+    if url:
+        start_page = browser_use_task_start_page(url)
+        base_payload["start_page"] = browser_use_task_start_page_summary(start_page)
+        if not start_page.get("ok"):
+            payload = {
+                **base_payload,
+                "ok": False,
+                "status": "failed",
+                "last_failure_at": now,
+                "last_failure_reason": f"Could not read the starting page before the task: {start_page.get('last_failure_reason') or 'unknown'}",
+            }
+            atomic_write_json(receipt_path, payload)
+            return payload
+    try:
+        result = asyncio.run(run_browser_use_agent_task(cleaned_goal, start_url=url, max_steps=steps, history_path=history_path, start_page=start_page))
+        completed = browser_use_task_completed(result)
+        payload = {
+            **base_payload,
+            **result,
+            "ok": completed,
+            "status": "ready" if completed else "failed",
+            "unproven_scope": [
+                "site-specific login state unless the task used an authenticated browser profile",
+                "changes outside the browser unless another Spark route performed them",
+            ],
+        }
+        if completed:
+            payload["last_success_at"] = now
+            payload["proven_scope"] = [
+                "multi-step browser task",
+                "agent planning loop",
+                "browser actions selected by browser-use",
+            ]
+        else:
+            payload["last_failure_at"] = now
+            payload["last_failure_reason"] = browser_use_task_failure_reason(result)
+        atomic_write_json(receipt_path, payload)
+        return payload
+    except Exception as exc:
+        payload = {
+            **base_payload,
+            "ok": False,
+            "status": "failed",
+            "last_failure_at": now,
+            "last_failure_reason": browser_use_command_failure_message(exc),
+        }
+        atomic_write_json(receipt_path, payload)
+        return payload
+
+
+def browser_use_task_start_page(url: str) -> dict[str, Any]:
+    return browser_use_action_payload(url, screenshot=True)
+
+
+def browser_use_task_start_page_summary(payload: dict[str, Any]) -> dict[str, str]:
+    return {
+        "url": str(payload.get("final_url") or payload.get("url") or ""),
+        "title": str(payload.get("title") or ""),
+        "text_excerpt": browser_use_bounded_text(str(payload.get("text_excerpt") or ""), 1200),
+        "screenshot_path": str(payload.get("screenshot_path") or ""),
+        "receipt_path": str(payload.get("receipt_path") or ""),
+    }
+
+
+async def run_browser_use_agent_task(
+    goal: str,
+    *,
+    start_url: str = "",
+    max_steps: int = 25,
+    history_path: Path | None = None,
+    start_page: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from browser_use import Agent, Browser
+
+    task = goal if not start_url else f"Start at {start_url}. {goal}"
+    task = f"{task}\nUse only the live browser state and page content observed during this run. Do not fill gaps from memory."
+    if start_page and start_page.get("ok"):
+        page = browser_use_task_start_page_summary(start_page)
+        task = (
+            f"{task}\n\nFresh browser-use starting-page evidence captured just before this task:\n"
+            f"URL: {page['url']}\n"
+            f"Title: {page['title']}\n"
+            f"Visible text excerpt:\n{page['text_excerpt']}\n"
+            "Treat this evidence as authoritative for the starting page unless later browser state contradicts it."
+        )
+    browser = Browser(headless=True)
+    try:
+        llm, llm_label = browser_use_agent_llm()
+        agent = Agent(
+            task=task,
+            llm=llm,
+            browser=browser,
+            max_actions_per_step=5,
+            extend_system_message=BROWSER_USE_AGENT_SYSTEM_NUDGE,
+            flash_mode=True,
+            include_tool_call_examples=False,
+            use_thinking=False,
+            use_judge=False,
+            llm_screenshot_size=BROWSER_USE_AGENT_LLM_SCREENSHOT_SIZE,
+            enable_planning=False,
+        )
+        history = await agent.run(max_steps=max_steps)
+        if history_path is not None:
+            history.save_to_file(history_path)
+        return browser_use_agent_history_payload(history) | {"llm": llm_label}
+    finally:
+        await browser.close()
+
+
+def browser_use_agent_llm() -> tuple[Any, str]:
+    browser_use_key = os.environ.get("BROWSER_USE_API_KEY") or fetch_secret("browser_use.api_key") or fetch_secret("llm.browser_use.api_key")
+    if browser_use_key:
+        from browser_use import ChatBrowserUse
+
+        return ChatBrowserUse(api_key=browser_use_key), "browser-use"
+
+    from browser_use.llm.litellm.chat import ChatLiteLLM
+
+    for provider in ("openai", "openrouter", "minimax", "kimi", "zai", "huggingface", "anthropic"):
+        spec = LLM_PROVIDER_ENV.get(provider, {})
+        api_key_env = spec.get("api_key_env", "")
+        api_key_secret = spec.get("api_key_secret", "")
+        api_key = (os.environ.get(api_key_env) if api_key_env else "") or (fetch_secret(api_key_secret) if api_key_secret else "")
+        if not api_key:
+            continue
+        model = os.environ.get(spec.get("model_env", "")) or spec.get("model_default", "")
+        api_base = os.environ.get(spec.get("base_url_env", "")) or spec.get("base_url_default", "")
+        if provider == "anthropic":
+            return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=f"anthropic/{model}", api_key=api_key)), provider
+        if provider == "openrouter":
+            return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=f"openrouter/{model}", api_key=api_key, api_base=api_base)), provider
+        if provider == "openai":
+            return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=model, api_key=api_key, api_base=api_base)), provider
+        return SparkBrowserUseStructuredLLM(ChatLiteLLM(model=f"openai/{model}", api_key=api_key, api_base=api_base)), provider
+
+    raise RuntimeError(
+        "No browser-use Agent LLM key is configured. Set BROWSER_USE_API_KEY, or configure an OpenAI-compatible Spark provider key."
+    )
+
+
+class SparkBrowserUseStructuredLLM:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    @property
+    def provider(self) -> str:
+        return str(getattr(self.inner, "provider", "spark-browser-use"))
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self.inner, "name", getattr(self.inner, "model", "spark-browser-use")))
+
+    @property
+    def model(self) -> str:
+        return str(getattr(self.inner, "model", self.name))
+
+    @property
+    def model_name(self) -> str:
+        return str(getattr(self.inner, "model_name", self.model))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def ainvoke(self, messages: list[Any], output_format: type[Any] | None = None, **kwargs: Any) -> Any:
+        if output_format is None:
+            return await self.inner.ainvoke(messages, output_format=None, **kwargs)
+
+        from browser_use.llm.views import ChatInvokeCompletion
+
+        completion = await self.inner.ainvoke(messages, output_format=None, **kwargs)
+        parsed = output_format.model_validate_json(
+            browser_use_normalize_structured_agent_json(str(getattr(completion, "completion", "") or ""))
+        )
+        return ChatInvokeCompletion(
+            completion=parsed,
+            thinking=getattr(completion, "thinking", None),
+            usage=getattr(completion, "usage", None),
+            stop_reason=getattr(completion, "stop_reason", None),
+        )
+
+
+def browser_use_normalize_structured_agent_json(raw: str) -> str:
+    text = raw.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    elif not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        return text
+
+    if "done" in payload and "action" not in payload:
+        payload = {"memory": str(payload.get("memory") or "Task result ready."), "action": [{"done": payload["done"]}]}
+    actions = payload.get("action")
+    if isinstance(actions, dict):
+        payload["action"] = [actions]
+        actions = payload["action"]
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            done = action.get("done")
+            if isinstance(done, dict) and "text" not in done and "answer" in done:
+                done["text"] = done.pop("answer")
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def browser_use_agent_history_payload(history: Any) -> dict[str, Any]:
+    def read(name: str, default: Any = None) -> Any:
+        value = getattr(history, name, default)
+        if callable(value):
+            try:
+                return value()
+            except TypeError:
+                return default
+        return value
+
+    final_result = read("final_result", "") or ""
+    extracted = read("extracted_content", []) or []
+    errors = read("errors", []) or []
+    urls = read("urls", []) or []
+    screenshots = read("screenshot_paths", []) or []
+    action_names = read("action_names", []) or []
+    return {
+        "final_result": browser_use_bounded_text(str(final_result), BROWSER_USE_TASK_TEXT_LIMIT),
+        "extracted_content": browser_use_bounded_list(extracted, limit=6),
+        "errors": browser_use_bounded_list(errors, limit=5),
+        "urls": browser_use_bounded_list(urls, limit=8),
+        "screenshot_paths": browser_use_bounded_list(screenshots, limit=8),
+        "action_names": browser_use_bounded_list(action_names, limit=20),
+        "number_of_steps": read("number_of_steps", 0) or 0,
+        "total_duration_seconds": read("total_duration_seconds", 0) or 0,
+        "is_done": bool(read("is_done", False)),
+        "is_successful": bool(read("is_successful", False)),
+        "is_judged": bool(read("is_judged", False)),
+        "is_validated": bool(read("is_validated", False)),
+        "judgement": browser_use_bounded_text(str(read("judgement", "") or ""), 1200),
+    }
+
+
+def browser_use_task_completed(result: dict[str, Any]) -> bool:
+    if result.get("is_successful") is False:
+        return False
+    if bool(result.get("is_judged")) and not bool(result.get("is_validated")):
+        return False
+    if bool(result.get("is_done")):
+        return True
+    if str(result.get("final_result") or "").strip():
+        return True
+    return False
+
+
+def browser_use_task_failure_reason(result: dict[str, Any]) -> str:
+    judgement = str(result.get("judgement") or "").strip()
+    if judgement:
+        return judgement[:500]
+    errors = result.get("errors")
+    if isinstance(errors, list):
+        cleaned = [str(item).strip() for item in errors if str(item).strip() and str(item).strip().lower() != "none"]
+        if cleaned:
+            return cleaned[-1][:500]
+    return "Browser-use Agent stopped before completing the task."
+
+
+def browser_use_bounded_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        value = [value] if value else []
+    return [browser_use_bounded_text(str(item), 500) for item in value[:limit] if str(item).strip()]
+
+
+def browser_use_command_failure_message(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        return detail[:500] or f"browser-use command exited {exc.returncode}"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"browser-use command timed out after {exc.timeout}s"
+    return str(exc)[:500] or type(exc).__name__
+
+
+def cmd_browser_use(args: argparse.Namespace) -> int:
+    action = getattr(args, "browser_use_command", "status")
+    if action == "status":
+        payload = browser_use_status_payload()
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+            return 0 if payload["status"] != "failed" else 1
+        print("Spark browser-use")
+        print(f"Status: {payload['status']}")
+        print(f"Package: {'available' if payload['package_available'] else 'missing'}")
+        print(f"CLI: {'available' if payload['cli_available'] else 'missing'}")
+        print(f"Status file: {payload['status_path']} ({'present' if payload['status_exists'] else 'missing'})")
+        if payload["proven_scope"]:
+            print("Proven scope: " + ", ".join(payload["proven_scope"]))
+        if payload["last_failure_reason"]:
+            print(f"Last failure: {payload['last_failure_reason']}")
+        print(f"Next: {payload['next_action']}")
+        return 0 if payload["status"] != "failed" else 1
+
+    if action == "install":
+        if getattr(args, "dry_run", False):
+            print("Spark browser-use install preview")
+            print("Would run:")
+            print(f"  {sys.executable} -m pip install {REPO_ROOT}[browser-use]")
+            print("  browser-use install")
+            print("  browser-use doctor")
+            print("Then run: spark browser-use probe")
+            return 0
+        subprocess.run([sys.executable, "-m", "pip", "install", f"{REPO_ROOT}[browser-use]"], check=True)
+        cli_path = browser_use_cli_path()
+        if not cli_path:
+            raise SystemExit("browser-use installed, but the browser-use CLI is not on PATH. Restart the terminal or check the Spark Python environment.")
+        run_browser_use_command(cli_path, "install", timeout=180)
+        run_browser_use_command(cli_path, "doctor", timeout=60)
+        print("browser-use is installed. Run `spark browser-use probe` to create a fresh proof receipt.")
+        return 0
+
+    if action == "probe":
+        payload = browser_use_probe_payload()
+        status_payload = browser_use_status_payload()
+        if getattr(args, "json", False):
+            print(json.dumps(status_payload | {"probe": payload}, indent=2))
+            return 0 if status_payload["ok"] else 1
+        if status_payload["ok"]:
+            print("Browser-use is ready for the probed scope.")
+            print("Proven scope: " + ", ".join(status_payload["proven_scope"]))
+            print("Still unproven: " + ", ".join(status_payload["unproven_scope"][:4]))
+            print(f"Status file: {status_payload['status_path']}")
+            return 0
+        print("Browser-use probe failed.")
+        print(f"Reason: {status_payload['last_failure_reason'] or payload.get('last_failure_reason') or 'unknown'}")
+        print(f"Status file: {status_payload['status_path']}")
+        return 1
+
+    if action in {"open", "screenshot"}:
+        payload = browser_use_action_payload(str(getattr(args, "url", "") or ""), screenshot=action == "screenshot" or bool(getattr(args, "screenshot", False)))
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+            return 0 if payload.get("ok") else 1
+        if payload.get("ok"):
+            print(f"Browser-use {payload['action']} succeeded.")
+            if payload.get("title"):
+                print(f"Title: {payload['title']}")
+            if payload.get("final_url"):
+                print(f"URL: {payload['final_url']}")
+            if payload.get("text_excerpt"):
+                print("")
+                print(str(payload["text_excerpt"]))
+            if payload.get("screenshot_path"):
+                print("")
+                print(f"Screenshot: {public_local_path_ref(str(payload['screenshot_path']))}")
+            return 0
+        print(f"Browser-use {action} failed.")
+        print(f"Reason: {payload.get('last_failure_reason') or 'unknown'}")
+        return 1
+
+    if action == "task":
+        payload = browser_use_task_payload(
+            " ".join(getattr(args, "goal", []) or []).strip(),
+            start_url=str(getattr(args, "url", "") or ""),
+            max_steps=int(getattr(args, "max_steps", 25) or 25),
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+            return 0 if payload.get("ok") else 1
+        if payload.get("ok"):
+            print("Browser-use task completed.")
+            if payload.get("final_result"):
+                print("")
+                print(str(payload["final_result"]))
+            if payload.get("urls"):
+                print("")
+                print("Visited: " + ", ".join(str(item) for item in payload["urls"][:5]))
+            print("")
+            print(f"Receipt: {public_local_path_ref(str(payload['receipt_path']))}")
+            return 0
+        print("Browser-use task failed.")
+        print(f"Reason: {payload.get('last_failure_reason') or 'unknown'}")
+        return 1
+
+    raise SystemExit(f"Unknown browser-use command: {action}")
 
 
 def write_setup_runtime_config(
@@ -14308,6 +15161,11 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark fix autostart", "use": "Targeted login-startup repair checklist: installed hooks, stale paths, permissions, and Telegram profile selection." },
             { "command": "spark fix spawner", "use": "Targeted repair checklist when /run, Kanban, Canvas, preview links, or Mission Control is not reachable." },
             { "command": "spark providers test --role chat", "use": "Send a tiny PING_OK probe through the selected chat LLM." },
+            { "command": "spark browser-use status", "use": "Check browser-use package, CLI, and latest proof receipt without starting a browser." },
+            { "command": "spark browser-use probe", "use": "Prove browser-use can open a page, read state, and capture a screenshot." },
+            { "command": "spark browser-use open <url>", "use": "Open a URL with browser-use and return page evidence." },
+            { "command": "spark browser-use screenshot <url>", "use": "Open a URL and capture a screenshot." },
+            { "command": "spark browser-use task [--url <url>] <goal>", "use": "Run a multi-step Browser Use Agent task and save a receipt." },
             { "command": "spark security audit", "use": "Check secrets, provider wiring, Telegram long polling, and runtime health." },
             { "command": "spark support bundle", "use": "Create a local redacted support archive. Nothing uploads automatically." },
             { "command": "spark doctor --json", "use": "Structured diagnostics for agents and support." },
@@ -14349,6 +15207,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark fix <target>", "use": "Run targeted repair guidance for telegram, secrets, spawner, providers, memory, live, update, or autostart." },
             { "command": "spark access status|guide|setup|disable-level5", "use": "Prepare, explain, and verify Spark workspace access, optional sandbox lanes, and explicit Level 5 guardrail state." },
             { "command": "spark providers list|status|test|recommend", "use": "Inspect, test, and choose LLM provider wiring." },
+            { "command": "spark browser-use status|install|probe|open|screenshot|task", "use": "Inspect, prove, and use the browser-use adapter for browser evidence and task loops." },
             { "command": "spark recommend llms|providers", "use": "Recommend Spark setup choices." },
             { "command": "spark security audit", "use": "Audit local security posture." },
             { "command": "spark sandbox docker|ssh|modal", "use": "Run Docker doctor/no-secret smoke, manage SSH targets and host-key trust, and run explicit no-secret Modal smoke." },
@@ -14761,6 +15620,34 @@ def build_parser() -> argparse.ArgumentParser:
     providers_test_parser.add_argument("--provider", choices=LLM_PROVIDER_CHOICES, help="Override the configured provider")
     providers_test_parser.add_argument("--json", action="store_true")
     providers_test_parser.set_defaults(func=cmd_providers)
+
+    browser_use_parser = subparsers.add_parser("browser-use", help="Install, inspect, and probe the optional browser-use adapter")
+    browser_use_sub = browser_use_parser.add_subparsers(dest="browser_use_command")
+    browser_use_status_parser = browser_use_sub.add_parser("status", help="Show browser-use package, CLI, and proof receipt status")
+    browser_use_status_parser.add_argument("--json", action="store_true")
+    browser_use_status_parser.set_defaults(func=cmd_browser_use, browser_use_command="status")
+    browser_use_install_parser = browser_use_sub.add_parser("install", help="Install browser-use and Chromium explicitly")
+    browser_use_install_parser.add_argument("--dry-run", action="store_true", help="Show install commands without running them")
+    browser_use_install_parser.set_defaults(func=cmd_browser_use, browser_use_command="install")
+    browser_use_probe_parser = browser_use_sub.add_parser("probe", help="Run a public-page browser-use proof and write Spark status")
+    browser_use_probe_parser.add_argument("--json", action="store_true")
+    browser_use_probe_parser.set_defaults(func=cmd_browser_use, browser_use_command="probe")
+    browser_use_open_parser = browser_use_sub.add_parser("open", help="Open a URL with browser-use and return page evidence")
+    browser_use_open_parser.add_argument("url")
+    browser_use_open_parser.add_argument("--screenshot", action="store_true", help="Also capture a screenshot")
+    browser_use_open_parser.add_argument("--json", action="store_true")
+    browser_use_open_parser.set_defaults(func=cmd_browser_use, browser_use_command="open")
+    browser_use_screenshot_parser = browser_use_sub.add_parser("screenshot", help="Open a URL and capture a screenshot")
+    browser_use_screenshot_parser.add_argument("url")
+    browser_use_screenshot_parser.add_argument("--json", action="store_true")
+    browser_use_screenshot_parser.set_defaults(func=cmd_browser_use, browser_use_command="screenshot")
+    browser_use_task_parser = browser_use_sub.add_parser("task", help="Run a multi-step Browser Use Agent task")
+    browser_use_task_parser.add_argument("goal", nargs=argparse.REMAINDER, help="Task goal for the Browser Use Agent")
+    browser_use_task_parser.add_argument("--url", help="Optional starting URL", default="")
+    browser_use_task_parser.add_argument("--max-steps", type=int, default=25, help="Maximum Browser Use Agent steps")
+    browser_use_task_parser.add_argument("--json", action="store_true")
+    browser_use_task_parser.set_defaults(func=cmd_browser_use, browser_use_command="task")
+    browser_use_parser.set_defaults(func=cmd_browser_use, browser_use_command="status")
 
     recommend_parser = subparsers.add_parser("recommend", help="Recommend Spark setup choices")
     recommend_sub = recommend_parser.add_subparsers(dest="recommend_command", required=True)
