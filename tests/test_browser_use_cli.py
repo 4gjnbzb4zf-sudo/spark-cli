@@ -293,6 +293,15 @@ class BrowserUseCliTests(unittest.TestCase):
         self.assertEqual(payload["status"], "failed")
         self.assertIn("maximum steps", payload["last_failure_reason"])
 
+    def test_task_receipt_fails_when_agent_reports_unsuccessful_result(self) -> None:
+        payload = {
+            "final_result": "I reached the page but could not complete the requested workflow.",
+            "is_done": True,
+            "is_successful": False,
+        }
+
+        self.assertFalse(cli.browser_use_task_completed(payload))
+
     def test_task_receipt_fails_when_judge_rejects_result(self) -> None:
         payload = {
             "final_result": "Looks done.",

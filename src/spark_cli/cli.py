@@ -6139,6 +6139,8 @@ def browser_use_agent_history_payload(history: Any) -> dict[str, Any]:
 
 
 def browser_use_task_completed(result: dict[str, Any]) -> bool:
+    if result.get("is_successful") is False:
+        return False
     if bool(result.get("is_judged")) and not bool(result.get("is_validated")):
         return False
     if bool(result.get("is_done")):
