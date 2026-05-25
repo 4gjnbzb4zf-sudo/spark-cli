@@ -1847,6 +1847,29 @@ def load_pending_setup_state() -> dict[str, Any]:
     return pending if isinstance(pending, dict) else {}
 
 
+def pending_setup_refresh_status(pending: dict[str, Any]) -> dict[str, Any] | None:
+    if not pending:
+        return None
+    bundle = str(pending.get("bundle") or "telegram-starter")
+    detail = str(pending.get("detail") or "").strip()
+    secure_secret_gate = "File secret backend is disabled" in detail
+    if secure_secret_gate:
+        summary = "Setup refresh is paused; Spark needs a secure secret backend before it rewrites stored secrets."
+        safe_to_continue = True
+    else:
+        summary = "Setup is pending and needs attention before Spark is fully configured."
+        safe_to_continue = False
+    return {
+        "status": "paused" if secure_secret_gate else "pending",
+        "safe_to_continue": safe_to_continue,
+        "summary": summary,
+        "detail": redact_shareable_text(detail),
+        "next": str(pending.get("next") or f"spark setup {bundle} --resume"),
+        "bundle": bundle,
+        "updated_at": pending.get("updated_at"),
+    }
+
+
 def print_setup_failure_truth_screen(detail: str) -> None:
     print("")
     print("Spark is not ready yet.")
@@ -5740,6 +5763,9 @@ def print_setup_upgrade_refresh_paused(args: argparse.Namespace) -> None:
     print("Next when you are ready:")
     print(f"  spark setup {bundle} --resume")
     print("")
+    print("To review what needs attention:")
+    print("  spark doctor")
+    print("")
     print("To keep working now:")
     print(f"  spark start {bundle}")
     print("  spark live status")
@@ -6075,13 +6101,17 @@ def collect_status_payload() -> dict[str, Any]:
     ensure_state_dirs()
     installed = load_json(REGISTRY_PATH, {})
     setup_state = load_json(CONFIG_PATH, {})
+    setup_refresh = pending_setup_refresh_status(load_pending_setup_state())
     if not installed:
-        return {
+        payload = {
             "ok": False,
             "summary": "No installed Spark modules recorded.",
             "repair": "Run `spark setup telegram-starter` first.",
             "modules": [],
         }
+        if setup_refresh:
+            payload["setup_refresh"] = setup_refresh
+        return payload
 
     modules = {name: load_module(Path(data["path"])) for name, data in installed.items()}
     module_results = [public_diagnostic_payload(evaluate_module_health(module)) for module in modules.values()]
@@ -6098,7 +6128,7 @@ def collect_status_payload() -> dict[str, Any]:
     public_tracked_pids = public_diagnostic_payload(tracked_pids)
     repair_hints = build_status_repair_hints(modules, module_results, setup_state, tracked_pids)
     ok = all(item["healthy"] is not False for item in module_results) and not repair_hints
-    return {
+    payload = {
         "ok": ok,
         "summary": "Spark CLI spike status",
         "telegram_ingress_owner": setup_state.get("telegram_ingress_owner"),
@@ -6109,6 +6139,9 @@ def collect_status_payload() -> dict[str, Any]:
         "config_dir": public_local_path_ref(CONFIG_DIR),
         "repair_hints": repair_hints,
     }
+    if setup_refresh:
+        payload["setup_refresh"] = setup_refresh
+    return payload
 
 
 def cmd_os_compile(args: argparse.Namespace) -> int:
@@ -6682,7 +6715,11 @@ def _doctor_module_summary(modules: list[Any], name: str, label: str) -> str:
 
 def print_plain_doctor(payload: dict[str, Any]) -> None:
     print("Spark doctor")
-    print("Spark is ready." if payload.get("ok") else "Spark needs attention.")
+    setup_refresh = payload.get("setup_refresh") if isinstance(payload.get("setup_refresh"), dict) else {}
+    if payload.get("ok") and setup_refresh.get("status") == "paused":
+        print("Spark is ready with a paused setup refresh.")
+    else:
+        print("Spark is ready." if payload.get("ok") else "Spark needs attention.")
     print("")
     modules = payload.get("modules") if isinstance(payload.get("modules"), list) else []
     llm_state = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
@@ -6697,6 +6734,18 @@ def print_plain_doctor(payload: dict[str, Any]) -> None:
     print(_doctor_module_summary(modules, "domain-chip-memory", "Memory"))
     print(_doctor_module_summary(modules, "spawner-ui", "Spawner"))
     print("")
+    if setup_refresh:
+        print("Setup refresh")
+        print(f"- Status: {setup_refresh.get('status') or 'pending'}")
+        summary = str(setup_refresh.get("summary") or "").strip()
+        if summary:
+            print(f"- Note: {summary}")
+        if setup_refresh.get("safe_to_continue"):
+            print("- Existing runtime: safe to keep using")
+        next_step = str(setup_refresh.get("next") or "").strip()
+        if next_step:
+            print(f"- Resume: {next_step}")
+        print("")
     profiles = payload.get("telegram_profiles")
     if isinstance(profiles, list) and profiles:
         running = sum(1 for item in profiles if isinstance(item, dict) and item.get("running"))

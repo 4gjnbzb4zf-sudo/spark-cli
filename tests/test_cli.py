@@ -153,6 +153,8 @@ from spark_cli.cli import (
     provider_status_payload,
     provider_recommendations_payload,
     provider_test_payload,
+    print_plain_doctor,
+    pending_setup_refresh_status,
     public_local_path_ref,
     resolve_provider_test_target,
     save_codex_client_config,
@@ -5761,6 +5763,47 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("[OK] Existing runtime: can keep running with the current setup", output)
         self.assertIn("Next when you are ready:", output)
         self.assertIn("spark setup telegram-starter --resume", output)
+        self.assertIn("spark doctor", output)
+
+    def test_doctor_surfaces_paused_setup_refresh_as_safe_to_continue(self) -> None:
+        payload = {
+            "ok": True,
+            "modules": [],
+            "llm": {"provider": "codex", "model": "gpt-5.5"},
+            "setup_refresh": {
+                "status": "paused",
+                "safe_to_continue": True,
+                "summary": "Setup refresh is paused; Spark needs a secure secret backend before it rewrites stored secrets.",
+                "next": "spark setup telegram-starter --resume",
+            },
+        }
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            print_plain_doctor(payload)
+
+        output = stdout.getvalue()
+        self.assertIn("Spark is ready with a paused setup refresh.", output)
+        self.assertIn("Setup refresh", output)
+        self.assertIn("- Status: paused", output)
+        self.assertIn("- Existing runtime: safe to keep using", output)
+        self.assertIn("spark setup telegram-starter --resume", output)
+
+    def test_pending_setup_refresh_status_structures_secret_backend_pause(self) -> None:
+        status = pending_setup_refresh_status({
+            "bundle": "telegram-starter",
+            "detail": (
+                "File secret backend is disabled because this OS has no built-in Spark file encryption. "
+                "Install/configure a keyring backend."
+            ),
+            "next": "spark setup telegram-starter --resume",
+            "updated_at": "2026-05-25T04:00:00Z",
+        })
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["status"], "paused")
+        self.assertTrue(status["safe_to_continue"])
+        self.assertIn("secure secret backend", status["summary"])
+        self.assertEqual(status["next"], "spark setup telegram-starter --resume")
 
     def test_print_install_summary_mentions_ingress_owner(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
