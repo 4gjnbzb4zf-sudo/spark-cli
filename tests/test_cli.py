@@ -11495,6 +11495,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn('export PATH="$SPARK_PREFIX/bin:$SPARK_NODE_BIN_DIR:\\$PATH"', script)
         self.assertIn("verify_install_layout", script)
         self.assertIn("Verifying install layout", script)
+        self.assertIn("require_option_value", script)
+        self.assertIn("require_non_option_value", script)
+        self.assertIn("Missing value for $option.", script)
         self.assertIn('local wrapper="$SPARK_PREFIX/bin/spark"', script)
         self.assertIn('local cli_dir="$SPARK_PREFIX/tools/spark-cli"', script)
         self.assertIn('local python_bin="$SPARK_PREFIX/tools/spark-cli-venv/bin/python"', script)
@@ -11570,6 +11573,54 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Autostart:           no; auto-disabled for --yes/non-interactive run", result.stdout)
         self.assertIn("--no-start-now --no-autostart --non-interactive", result.stdout)
         self.assertNotIn("--start-now --autostart", result.stdout)
+
+    def test_install_script_reports_missing_option_values_before_install_actions(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        script_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env = dict(os.environ)
+            env["SPARK_PREFIX"] = str(Path(tmp_dir) / ".spark")
+            result = subprocess.run(
+                [bash, "./scripts/install.sh", "--prefix", "--dry-run"],
+                cwd=str(script_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertIn("Missing value for --prefix.", result.stderr)
+        self.assertIn("Usage: install.sh [options]", result.stderr)
+
+    def test_install_script_setup_arg_accepts_option_like_values(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash is not available")
+        script_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env = dict(os.environ)
+            env["SPARK_PREFIX"] = str(Path(tmp_dir) / ".spark")
+            result = subprocess.run(
+                [
+                    bash,
+                    "./scripts/install.sh",
+                    "--dry-run",
+                    "--upgrade-existing",
+                    "--setup-arg",
+                    "--future-setup-flag",
+                ],
+                cwd=str(script_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("--future-setup-flag", result.stdout)
 
     def test_windows_install_script_bootstraps_local_prefix_contract(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "scripts" / "install.ps1").read_text(encoding="utf-8")
