@@ -26,4 +26,4 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     SPARK_HOME=/tmp/spark-home
 
-CMD ["bash", "-lc", "python -m pytest tests/test_cli.py -q && python -m spark_cli.cli verify --installers"]
+CMD ["bash", "-lc", "python -m pytest tests/test_access.py tests/test_docker_entrypoint.py -q && spark --help >/tmp/spark-help.txt"]

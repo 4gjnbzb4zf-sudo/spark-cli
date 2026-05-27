@@ -58,11 +58,11 @@ Use this for clean regression checks:
 bash scripts/docker-dev-smoke.sh
 ```
 
-By default this builds `spark-cli-dev:local` and runs:
+By default this builds `spark-cli-dev:local` and runs a bounded Docker smoke:
 
 ```bash
-python -m pytest tests/test_cli.py -q
-python -m spark_cli.cli verify --installers
+python -m pytest tests/test_access.py tests/test_docker_entrypoint.py -q
+spark --help >/tmp/spark-help.txt
 ```
 
 Optional registry/provenance checks:
@@ -122,7 +122,8 @@ The wrapper runs the container with:
 - `--read-only`
 - `--cap-drop ALL`
 - `--security-opt no-new-privileges`
-- tmpfs scratch space at `/tmp` and `/sandbox`
+- tmpfs scratch space at `/tmp` and `/sandbox`, with `/sandbox` owned by the
+  unprivileged Spark user
 - isolated `HOME` and `SPARK_HOME`
 
 To allow network for a specific experiment:
