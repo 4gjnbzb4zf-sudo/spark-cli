@@ -1011,7 +1011,14 @@ def dpapi_protect(value: str) -> str:
     in_blob = _DataBlob(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
     out_blob = _DataBlob()
     if not _crypt32().CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-        raise OSError("CryptProtectData failed")
+        err = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
+        raise OSError(
+            f"CryptProtectData failed (Windows error code {err}). "
+            "Verify a user profile is loaded — DPAPI commonly fails under SSH, "
+            "scheduled tasks, or service accounts where the interactive profile "
+            f"is unavailable. Re-run from an interactive desktop session, or set "
+            f"{ALLOW_INSECURE_FILE_SECRETS_ENV}=1 to opt out of DPAPI (insecure)."
+        )
     try:
         protected = ctypes.string_at(out_blob.pbData, out_blob.cbData)
     finally:
@@ -1030,7 +1037,14 @@ def dpapi_unprotect(value: str) -> str:
     in_blob = _DataBlob(len(protected), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
     out_blob = _DataBlob()
     if not _crypt32().CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-        raise OSError("CryptUnprotectData failed")
+        err = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
+        raise OSError(
+            f"CryptUnprotectData failed (Windows error code {err}). "
+            "The stored secret may have been encrypted under a different user "
+            "profile, or the DPAPI master key is unreachable. Re-run from the "
+            "same user account that wrote the secret, or delete the stored "
+            "value and re-enter it with `spark setup`."
+        )
     try:
         raw = ctypes.string_at(out_blob.pbData, out_blob.cbData)
     finally:
@@ -1703,29 +1717,14 @@ def collect_module_provenance_payload(
     }
 
 
-REMOTE_GIT_REF_TIMEOUT_SECONDS = 60
-REMOTE_GIT_REF_ATTEMPTS = 2
-
-
 def resolve_remote_git_ref(source: str, ref: str = "HEAD") -> str:
     remote_ref = (ref or "HEAD").strip() or "HEAD"
-    command = git_command("ls-remote", normalize_git_url(source), remote_ref)
-    last_timeout: subprocess.TimeoutExpired | None = None
-    for _attempt in range(REMOTE_GIT_REF_ATTEMPTS):
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=REMOTE_GIT_REF_TIMEOUT_SECONDS,
-            )
-            break
-        except subprocess.TimeoutExpired as error:
-            last_timeout = error
-    else:
-        raise RuntimeError(
-            f"timed out after {REMOTE_GIT_REF_ATTEMPTS} attempts resolving remote {remote_ref}"
-        ) from last_timeout
+    result = subprocess.run(
+        git_command("ls-remote", normalize_git_url(source), remote_ref),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or "unknown git error"
         raise RuntimeError(detail)
@@ -1766,7 +1765,7 @@ def collect_registry_pin_drift_payload(
                     raise
                 remote = resolver(source).strip().lower()
             validate_commit_pin(remote)
-        except (RuntimeError, SystemExit, OSError, subprocess.TimeoutExpired) as error:
+        except (RuntimeError, SystemExit) as error:
             checks.append(
                 {
                     "name": str(name),
@@ -3549,23 +3548,17 @@ def openai_base_url_kind(base_url: str | None) -> str:
 def resolve_llm_roles(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
     default_provider = resolve_llm_provider(args, secret_values)
     agent_provider = getattr(args, "agent_llm_provider", None)
-    chat_provider = getattr(args, "chat_llm_provider", None)
-    effective_default = (
-        str(chat_provider)
-        if chat_provider and not agent_provider and default_provider == "not_configured"
-        else default_provider
-    )
     roles: dict[str, str] = {}
     for role in LLM_ROLES:
         explicit = getattr(args, f"{role}_llm_provider", None)
         if explicit:
             roles[role] = str(explicit)
         elif role == "mission":
-            roles[role] = default_mission_llm_provider(effective_default)
+            roles[role] = default_mission_llm_provider(default_provider)
         elif agent_provider:
             roles[role] = str(agent_provider)
         else:
-            roles[role] = effective_default
+            roles[role] = default_provider
     return roles
 
 

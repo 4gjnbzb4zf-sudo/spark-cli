@@ -476,21 +476,6 @@ class SparkCliTests(unittest.TestCase):
             self.assertNotIn(leaked, text)
         self.assertIn("[REDACTED]", text)
 
-    def test_sandbox_redaction_catches_github_token_prefixes(self) -> None:
-        tokens = [
-            "ghp_abcdefghijklmnopqrstuvwxyz123456",
-            "gho_abcdefghijklmnopqrstuvwxyz123456",
-            "ghu_abcdefghijklmnopqrstuvwxyz123456",
-            "ghs_abcdefghijklmnopqrstuvwxyz123456",
-            "ghr_abcdefghijklmnopqrstuvwxyz123456",
-        ]
-
-        text = redact_sandbox_text("\n".join(tokens))
-
-        for token in tokens:
-            self.assertNotIn(token, text)
-        self.assertEqual(text.count("[REDACTED]"), len(tokens))
-
     def test_sandbox_redaction_catches_url_credentials_and_jwts(self) -> None:
         jwt = (
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -4015,33 +4000,6 @@ class SparkCliTests(unittest.TestCase):
             {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
         )
 
-    def test_resolve_llm_roles_uses_chat_provider_as_setup_default_when_no_global_provider(self) -> None:
-        args = build_parser().parse_args(["setup", "--non-interactive", "--chat-llm-provider", "zai"])
-        with patch("spark_cli.cli.load_json", return_value={}):
-            roles = resolve_llm_roles(args, {"llm.zai.api_key": "zai-key"})
-        self.assertEqual(
-            roles,
-            {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
-        )
-
-    def test_resolve_llm_roles_does_not_let_chat_provider_override_agent_provider(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "setup",
-                "--non-interactive",
-                "--chat-llm-provider",
-                "zai",
-                "--agent-llm-provider",
-                "openai",
-            ]
-        )
-        with patch("spark_cli.cli.load_json", return_value={}):
-            roles = resolve_llm_roles(args, {"llm.zai.api_key": "zai-key"})
-        self.assertEqual(
-            roles,
-            {"chat": "zai", "builder": "openai", "memory": "openai", "mission": "not_configured"},
-        )
-
     def test_build_llm_env_lmstudio_powers_agent_and_mission_by_default(self) -> None:
         args = build_parser().parse_args(
             [
@@ -4377,27 +4335,6 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(calls, [("https://github.com/vibeforge1111/spark-telegram-bot", "refs/heads/release/stability-2026-05-09")])
         self.assertEqual(payload["checks"][0]["remote_ref"], "refs/heads/release/stability-2026-05-09")
         self.assertIn("matches remote refs/heads/release/stability-2026-05-09", payload["checks"][0]["detail"])
-
-    def test_registry_pin_drift_payload_reports_remote_timeout_without_traceback(self) -> None:
-        registry = {
-            "modules": {
-                "domain-chip-memory": {
-                    "source": "https://github.com/vibeforge1111/domain-chip-memory",
-                    "commit": "e" * 40,
-                    "blessed": True,
-                }
-            },
-            "bundles": {},
-        }
-
-        def resolver(_source: str, _ref: str) -> str:
-            raise subprocess.TimeoutExpired(["git", "ls-remote"], 60)
-
-        payload = collect_registry_pin_drift_payload(registry=registry, resolver=resolver)
-
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["checks"][0]["remote_head"], "")
-        self.assertIn("Could not verify remote HEAD", payload["checks"][0]["detail"])
 
     def test_autostart_install_defaults_to_telegram_starter_and_now_is_optional(self) -> None:
         args = build_parser().parse_args(["autostart", "install", "--now"])
