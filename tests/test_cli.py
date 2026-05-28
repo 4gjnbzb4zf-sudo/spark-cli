@@ -7386,6 +7386,28 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(result["healthcheck_command"], "GET http://127.0.0.1:8080/api/health/live")
         run_runtime.assert_not_called()
 
+    def test_spawner_health_does_not_trust_untracked_local_port(self) -> None:
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                "healthcheck": {"command": "npm run health:spark"},
+                "run": {"default": {"ready_check": "http://127.0.0.1:3333/api/providers"}},
+            },
+        )
+
+        with patch("spark_cli.cli.module_runtime_env", return_value={}), \
+             patch("spark_cli.cli.load_pids", return_value={}), \
+             patch("spark_cli.cli.urllib.request.urlopen") as urlopen, \
+             patch("spark_cli.cli.run_runtime_command") as run_runtime:
+            result = evaluate_module_health(module)
+
+        self.assertFalse(result["healthy"])
+        self.assertIn("no Spark-supervised spawner-ui process", result["detail"])
+        urlopen.assert_not_called()
+        run_runtime.assert_not_called()
+
     def test_external_telegram_health_skips_local_bot_token_check(self) -> None:
         module = Module(
             name="spark-telegram-bot",
