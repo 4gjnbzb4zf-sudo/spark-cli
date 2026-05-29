@@ -4930,6 +4930,18 @@ def evaluate_module_health(module: Module) -> dict[str, Any]:
     setup_state = load_json(CONFIG_PATH, {}) if module.name == "spark-telegram-bot" else {}
     runtime_env = module_runtime_env(module, module_healthcheck_profile(module, setup_state))
     if module.name == "spawner-ui" and spawner_should_use_liveness_endpoint(runtime_env):
+        if not spawner_liveness_can_trust_local_port(runtime_env):
+            return {
+                "name": module.name,
+                "version": module.version,
+                "kind": module.kind,
+                "plane": module.plane,
+                "healthy": False,
+                "detail": "Spawner UI live health is not trusted because no Spark-supervised spawner-ui process is running.",
+                "healthcheck_command": None,
+                "failure_hint": "Run `spark start spawner-ui`, then rerun `spark status`.",
+                "success_hint": str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None,
+            }
         health_url = spawner_runtime_health_url(module, runtime_env)
         failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
         success_hint = str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None
@@ -13504,6 +13516,18 @@ def spawner_should_use_liveness_endpoint(env: dict[str, str]) -> bool:
     # Spawner liveness is separate from provider readiness; provider details
     # stay visible through `spark providers status`.
     return True
+
+
+def spawner_liveness_can_trust_local_port(env: dict[str, str]) -> bool:
+    if str(env.get("SPARK_LIVE_CONTAINER") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    pids = load_pids()
+    for process_key in tracked_process_keys_for_module(pids, "spawner-ui"):
+        record = pids.get(process_key)
+        pid = int(record.get("pid", 0)) if isinstance(record, dict) else 0
+        if pid and pid_is_running(pid):
+            return True
+    return False
 
 
 def spawner_runtime_port(module: Module, env: dict[str, str]) -> str:
