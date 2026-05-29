@@ -45,6 +45,7 @@ CLI_MAX_SUPPORTED_SCHEMA = 1
 DPAPI_SECRET_PREFIX = "dpapi:v1:"
 INSECURE_FILE_SECRET_PREFIX = "insecure-local:v1:"
 ALLOW_INSECURE_FILE_SECRETS_ENV = "SPARK_ALLOW_INSECURE_FILE_SECRETS"
+SETUP_OPTIONAL_ON_UPGRADE_ENV = "SPARK_SETUP_OPTIONAL_ON_UPGRADE"
 PRIVATE_FILE_MODE = 0o600
 GIT_SHORTHAND_HOSTS = {"github.com", "gitlab.com"}
 
@@ -1700,16 +1701,35 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
                     "detail": f"Could not fetch hosted command metadata: {exc}",
                 }
             )
+    hosted_release: dict[str, Any] | None = None
+    if hosted:
+        hosted_release = {
+            "release": hosted_release_name,
+            "commit": hosted_release_ref,
+            "expected_release": expected_hosted_release,
+            "expected_commit": expected_hosted_ref,
+            "source_basis": hosted_source_basis,
+            "verified_at": timestamp_now(),
+            "fresh": bool(
+                hosted_release_name
+                and hosted_release_ref
+                and hosted_release_name == expected_hosted_release
+                and hosted_release_ref == expected_hosted_ref
+            ),
+        }
     try:
         manifest_label = str(INSTALLER_MANIFEST_PATH.relative_to(REPO_ROOT)).replace("\\", "/")
     except ValueError:
         manifest_label = str(INSTALLER_MANIFEST_PATH)
-    return {
+    payload: dict[str, Any] = {
         "ok": all(check["ok"] for check in checks),
         "summary": "Spark installer integrity verification",
         "manifest": manifest_label,
         "checks": checks,
     }
+    if hosted_release is not None:
+        payload["hosted_release"] = hosted_release
+    return payload
 
 
 def collect_module_provenance_payload(
@@ -1900,6 +1920,33 @@ def save_pending_setup_state(stage: str, detail: str, setup_state: dict[str, Any
     save_json(SETUP_PENDING_PATH, pending)
 
 
+def save_paused_setup_refresh_state(stage: str, detail: str, setup_state: dict[str, Any] | None = None) -> None:
+    bundle = "telegram-starter"
+    if isinstance(setup_state, dict):
+        bundle = str(setup_state.get("bundle") or bundle)
+    pending: dict[str, Any] = {
+        "event": "setup_refresh_paused",
+        "updated_at": timestamp_now(),
+        "stage": stage,
+        "detail": detail,
+        "ready": [
+            "CLI upgrade complete",
+            "Existing runtime can keep running with the current setup",
+        ],
+        "still_needed": [
+            "Secure secret backend before Spark rewrites stored secrets",
+        ],
+        "next": f"spark setup {bundle} --resume",
+        "safe_to_continue": True,
+    }
+    if isinstance(setup_state, dict):
+        pending["bundle"] = setup_state.get("bundle")
+        pending["modules"] = setup_state.get("modules")
+        pending["telegram_ingress_owner"] = setup_state.get("telegram_ingress_owner")
+        pending["onboarding_session"] = setup_state.get("onboarding_session")
+    save_json(SETUP_PENDING_PATH, pending)
+
+
 def clear_pending_setup_state() -> None:
     try:
         SETUP_PENDING_PATH.unlink(missing_ok=True)
@@ -1912,6 +1959,29 @@ def load_pending_setup_state() -> dict[str, Any]:
         return {}
     pending = load_json(SETUP_PENDING_PATH, {})
     return pending if isinstance(pending, dict) else {}
+
+
+def pending_setup_refresh_status(pending: dict[str, Any]) -> dict[str, Any] | None:
+    if not pending:
+        return None
+    bundle = str(pending.get("bundle") or "telegram-starter")
+    detail = str(pending.get("detail") or "").strip()
+    secure_secret_gate = "File secret backend is disabled" in detail
+    if secure_secret_gate:
+        summary = "Setup refresh is paused; Spark needs a secure secret backend before it rewrites stored secrets."
+        safe_to_continue = True
+    else:
+        summary = "Setup is pending and needs attention before Spark is fully configured."
+        safe_to_continue = False
+    return {
+        "status": "paused" if secure_secret_gate else "pending",
+        "safe_to_continue": safe_to_continue,
+        "summary": summary,
+        "detail": redact_shareable_text(detail),
+        "next": str(pending.get("next") or f"spark setup {bundle} --resume"),
+        "bundle": bundle,
+        "updated_at": pending.get("updated_at"),
+    }
 
 
 def print_setup_failure_truth_screen(detail: str) -> None:
@@ -6652,6 +6722,63 @@ def print_setup_summary(
     )
 
 
+def setup_args_include_explicit_secrets(args: argparse.Namespace) -> bool:
+    secret_arg_names = (
+        "secret",
+        "bot_token",
+        "admin_telegram_ids",
+        "telegram_relay_secret",
+        "zai_api_key",
+        "openai_api_key",
+        "anthropic_api_key",
+        "openrouter_api_key",
+        "huggingface_api_key",
+        "kimi_api_key",
+        "minimax_api_key",
+        "elevenlabs_api_key",
+    )
+    return any(bool(getattr(args, name, None)) for name in secret_arg_names)
+
+
+def setup_upgrade_refresh_can_pause(
+    args: argparse.Namespace,
+    detail: str,
+    *,
+    existing_config: bool,
+    existing_modules: bool,
+) -> bool:
+    if not truthy_env(SETUP_OPTIONAL_ON_UPGRADE_ENV):
+        return False
+    if not getattr(args, "non_interactive", False):
+        return False
+    if getattr(args, "start_now", True) or getattr(args, "autostart", True):
+        return False
+    if setup_args_include_explicit_secrets(args):
+        return False
+    if "File secret backend is disabled" not in detail:
+        return False
+    return existing_config and existing_modules
+
+
+def print_setup_upgrade_refresh_paused(args: argparse.Namespace) -> None:
+    bundle = str(getattr(args, "bundle", "telegram-starter") or "telegram-starter")
+    print("")
+    print("Spark upgrade status")
+    print("  [OK] CLI upgrade: complete")
+    print("  [PAUSED] Setup refresh: secrets need a secure backend before Spark rewrites them")
+    print("  [OK] Existing runtime: can keep running with the current setup")
+    print("")
+    print("Next when you are ready:")
+    print(f"  spark setup {bundle} --resume")
+    print("")
+    print("To review what needs attention:")
+    print("  spark doctor")
+    print("")
+    print("To keep working now:")
+    print(f"  spark start {bundle}")
+    print("  spark live status")
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     if not telegram_profile_is_default(getattr(args, "profile", None)):
@@ -6659,6 +6786,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
     apply_setup_feature_aliases(args)
     setup_state: dict[str, Any] | None = None
     pending = load_pending_setup_state() if getattr(args, "resume", False) else {}
+    existing_config_before_setup = CONFIG_PATH.exists()
+    existing_installed_before_setup = load_json(REGISTRY_PATH, {})
+    existing_modules_before_setup = isinstance(existing_installed_before_setup, dict) and bool(existing_installed_before_setup)
     if pending:
         pending_bundle = str(pending.get("bundle") or "").strip()
         if pending_bundle and getattr(args, "bundle", "telegram-starter") == "telegram-starter":
@@ -6726,6 +6856,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return 0 if ((start_ok or not start_now) and first_message_ok) else 1
     except SystemExit as exc:
         detail = str(exc)
+        if setup_upgrade_refresh_can_pause(
+            args,
+            detail,
+            existing_config=existing_config_before_setup,
+            existing_modules=existing_modules_before_setup,
+        ):
+            save_paused_setup_refresh_state("setup", detail, setup_state)
+            print_setup_upgrade_refresh_paused(args)
+            return 0
         save_pending_setup_state("setup", detail, setup_state)
         print_setup_failure_truth_screen(detail)
         raise
@@ -6979,13 +7118,17 @@ def collect_status_payload() -> dict[str, Any]:
     ensure_state_dirs()
     installed = load_json(REGISTRY_PATH, {})
     setup_state = load_json(CONFIG_PATH, {})
+    setup_refresh = pending_setup_refresh_status(load_pending_setup_state())
     if not installed:
-        return {
+        payload = {
             "ok": False,
             "summary": "No installed Spark modules recorded.",
             "repair": "Run `spark setup telegram-starter` first.",
             "modules": [],
         }
+        if setup_refresh:
+            payload["setup_refresh"] = setup_refresh
+        return payload
 
     modules = {name: load_module(Path(data["path"])) for name, data in installed.items()}
     module_results = [public_diagnostic_payload(evaluate_module_health(module)) for module in modules.values()]
@@ -7002,7 +7145,7 @@ def collect_status_payload() -> dict[str, Any]:
     public_tracked_pids = public_diagnostic_payload(tracked_pids)
     repair_hints = build_status_repair_hints(modules, module_results, setup_state, tracked_pids)
     ok = all(item["healthy"] is not False for item in module_results) and not repair_hints
-    return {
+    payload = {
         "ok": ok,
         "summary": "Spark CLI spike status",
         "telegram_ingress_owner": setup_state.get("telegram_ingress_owner"),
@@ -7013,6 +7156,9 @@ def collect_status_payload() -> dict[str, Any]:
         "config_dir": public_local_path_ref(CONFIG_DIR),
         "repair_hints": repair_hints,
     }
+    if setup_refresh:
+        payload["setup_refresh"] = setup_refresh
+    return payload
 
 
 def cmd_os_compile(args: argparse.Namespace) -> int:
@@ -7587,7 +7733,11 @@ def _doctor_module_summary(modules: list[Any], name: str, label: str) -> str:
 
 def print_plain_doctor(payload: dict[str, Any]) -> None:
     print("Spark doctor")
-    print("Spark is ready." if payload.get("ok") else "Spark needs attention.")
+    setup_refresh = payload.get("setup_refresh") if isinstance(payload.get("setup_refresh"), dict) else {}
+    if payload.get("ok") and setup_refresh.get("status") == "paused":
+        print("Spark is ready with a paused setup refresh.")
+    else:
+        print("Spark is ready." if payload.get("ok") else "Spark needs attention.")
     print("")
     modules = payload.get("modules") if isinstance(payload.get("modules"), list) else []
     llm_state = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
@@ -7602,6 +7752,18 @@ def print_plain_doctor(payload: dict[str, Any]) -> None:
     print(_doctor_module_summary(modules, "domain-chip-memory", "Memory"))
     print(_doctor_module_summary(modules, "spawner-ui", "Spawner"))
     print("")
+    if setup_refresh:
+        print("Setup refresh")
+        print(f"- Status: {setup_refresh.get('status') or 'pending'}")
+        summary = str(setup_refresh.get("summary") or "").strip()
+        if summary:
+            print(f"- Note: {summary}")
+        if setup_refresh.get("safe_to_continue"):
+            print("- Existing runtime: safe to keep using")
+        next_step = str(setup_refresh.get("next") or "").strip()
+        if next_step:
+            print(f"- Resume: {next_step}")
+        print("")
     profiles = payload.get("telegram_profiles")
     if isinstance(profiles, list) and profiles:
         running = sum(1 for item in profiles if isinstance(item, dict) and item.get("running"))
@@ -12883,6 +13045,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(json.dumps(payload, indent=2))
             return 0 if payload["ok"] else 1
         print(payload["summary"])
+        hosted_release = payload.get("hosted_release")
+        if isinstance(hosted_release, dict):
+            marker = "[OK]" if hosted_release.get("fresh") else "[FIX]"
+            release = hosted_release.get("release") or "<unknown release>"
+            commit = hosted_release.get("commit") or "<unknown commit>"
+            print("Hosted release freshness:")
+            print(f"{marker} published: {release} @ {commit}")
+            print(f"      verified: {hosted_release.get('verified_at') or '<unknown time>'}")
+            print(f"      expected: {hosted_release.get('expected_release') or '<unknown release>'} @ {hosted_release.get('expected_commit') or '<unknown commit>'}")
         for check in payload["checks"]:
             marker = "[OK]" if check["ok"] else "[FIX]"
             print(f"{marker} {check['name']}: {check['detail']}")

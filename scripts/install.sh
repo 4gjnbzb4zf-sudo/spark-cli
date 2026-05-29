@@ -3,8 +3,8 @@ set -euo pipefail
 
 SPARK_PREFIX="${SPARK_PREFIX:-$HOME/.spark}"
 SPARK_CLI_SOURCE="${SPARK_CLI_SOURCE:-https://github.com/vibeforge1111/spark-cli}"
-SPARK_CLI_RELEASE_NAME="${SPARK_CLI_RELEASE_NAME:-spark-cli-public-installer-2026-05-24-r15}"
-SPARK_DEFAULT_CLI_REF="7ab32b23003726dcea8a414c8e9395bf13f45e12"
+SPARK_CLI_RELEASE_NAME="${SPARK_CLI_RELEASE_NAME:-spark-cli-public-installer-2026-05-29-r17}"
+SPARK_DEFAULT_CLI_REF="8ebbc64bcf650f45b4be4141a7f6c97604f8f2eb"
 SPARK_CLI_REF_USER_SET=0
 if [ -n "${SPARK_CLI_REF:-}" ]; then
   SPARK_CLI_REF_USER_SET=1
@@ -1046,7 +1046,20 @@ run_setup() {
   fi
   log "Running spark setup $SPARK_BUNDLE"
   local setup_exit=0
+  local previous_setup_optional="${SPARK_SETUP_OPTIONAL_ON_UPGRADE-}"
+  local had_setup_optional=0
+  if [ "${SPARK_SETUP_OPTIONAL_ON_UPGRADE+x}" = "x" ]; then
+    had_setup_optional=1
+  fi
+  if [ "$SPARK_EXISTING_MODE" = "upgrade" ]; then
+    export SPARK_SETUP_OPTIONAL_ON_UPGRADE=1
+  fi
   "${spark_setup_cmd[@]}" || setup_exit=$?
+  if [ "$had_setup_optional" = "1" ]; then
+    export SPARK_SETUP_OPTIONAL_ON_UPGRADE="$previous_setup_optional"
+  else
+    unset SPARK_SETUP_OPTIONAL_ON_UPGRADE
+  fi
   cleanup_secret_files
   return "$setup_exit"
 }
@@ -1056,6 +1069,44 @@ run_autostart() {
     return
   fi
   log "Spark startup was handled by setup"
+}
+
+setup_refresh_paused() {
+  [ -f "$SPARK_PREFIX/state/setup.pending.json" ] &&
+    grep -F '"event": "setup_refresh_paused"' "$SPARK_PREFIX/state/setup.pending.json" >/dev/null 2>&1
+}
+
+print_install_outcome() {
+  local setup_line runtime_line telegram_line
+  if [ "$SPARK_SKIP_SETUP" = "1" ]; then
+    setup_line="[SKIP] Setup: skipped by request"
+    runtime_line="[MANUAL] Runtime: start after setup"
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding after setup"
+  elif setup_refresh_paused; then
+    setup_line="[PAUSED] Setup refresh: secrets need a secure backend before Spark rewrites them"
+    runtime_line="[OK] Existing runtime: can keep running with the current setup"
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding"
+  elif [ -f "$SPARK_PREFIX/state/setup.pending.json" ]; then
+    setup_line="[PAUSED] Setup: run spark doctor"
+    runtime_line="[MANUAL] Runtime: resume setup before changing secrets"
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding after setup resumes"
+  else
+    setup_line="[OK] Setup: configured"
+    if [ "$SPARK_AUTOSTART" = "1" ]; then
+      runtime_line="[STARTED] Runtime: setup handled start/autostart"
+    else
+      runtime_line="[MANUAL] Runtime: start after setup"
+    fi
+    telegram_line="[VERIFY] Telegram: run spark verify --onboarding"
+  fi
+  cat <<EOF
+
+Install outcome:
+  [OK] CLI upgrade: complete
+  $setup_line
+  $runtime_line
+  $telegram_line
+EOF
 }
 
 main() {
@@ -1108,6 +1159,7 @@ For default installs, the installer also adds this line to your shell profile:
 Install log:
   $SPARK_INSTALL_LOG
 EOF
+  print_install_outcome
   if [ "$SPARK_SKIP_SETUP" = "1" ]; then
     cat <<EOF
 
