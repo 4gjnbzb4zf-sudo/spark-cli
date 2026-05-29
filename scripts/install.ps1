@@ -711,13 +711,22 @@ function Run-Setup {
     if ($MiniMaxApiKey) { $setupArgs += @("--minimax-api-key", (New-SetupSecretRef $MiniMaxApiKey)) }
     $setupArgs += $SetupArg
     Write-SparkLog "Running spark setup $Bundle"
+    $previousSetupOptional = $env:SPARK_SETUP_OPTIONAL_ON_UPGRADE
     try {
+        if ($UpgradeExisting) {
+            $env:SPARK_SETUP_OPTIONAL_ON_UPGRADE = "1"
+        }
         $setupStartArgs = if ($NoAutostart) { @("--no-start-now", "--no-autostart") } else { @("--start-now", "--autostart") }
         & $sparkCmd setup $Bundle @setupStartArgs @setupArgs
         if ($LASTEXITCODE -ne 0) {
             throw "spark setup failed with exit code $LASTEXITCODE"
         }
     } finally {
+        if ($null -eq $previousSetupOptional) {
+            Remove-Item Env:\SPARK_SETUP_OPTIONAL_ON_UPGRADE -ErrorAction SilentlyContinue
+        } else {
+            $env:SPARK_SETUP_OPTIONAL_ON_UPGRADE = $previousSetupOptional
+        }
         foreach ($secretFile in $secretFiles) {
             Remove-Item -LiteralPath $secretFile -Force -ErrorAction SilentlyContinue
         }
@@ -729,6 +738,49 @@ function Run-Autostart {
         return
     }
     Write-SparkLog "Spark startup was handled by setup"
+}
+
+function Test-SetupRefreshPaused {
+    $pendingSetupPath = Join-Path $Script:SparkPrefix "state\setup.pending.json"
+    if (-not (Test-Path -LiteralPath $pendingSetupPath)) {
+        return $false
+    }
+    try {
+        return (Get-Content -LiteralPath $pendingSetupPath -Raw -ErrorAction Stop).Contains('"event": "setup_refresh_paused"')
+    } catch {
+        return $false
+    }
+}
+
+function Show-InstallOutcome {
+    $pendingSetupPath = Join-Path $Script:SparkPrefix "state\setup.pending.json"
+    if ($SkipSetup) {
+        $setupLine = "[SKIP] Setup: skipped by request"
+        $runtimeLine = "[MANUAL] Runtime: start after setup"
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding after setup"
+    } elseif (Test-SetupRefreshPaused) {
+        $setupLine = "[PAUSED] Setup refresh: secrets need a secure backend before Spark rewrites them"
+        $runtimeLine = "[OK] Existing runtime: can keep running with the current setup"
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding"
+    } elseif (Test-Path -LiteralPath $pendingSetupPath) {
+        $setupLine = "[PAUSED] Setup: run spark doctor"
+        $runtimeLine = "[MANUAL] Runtime: resume setup before changing secrets"
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding after setup resumes"
+    } else {
+        $setupLine = "[OK] Setup: configured"
+        if ($NoAutostart) {
+            $runtimeLine = "[MANUAL] Runtime: start after setup"
+        } else {
+            $runtimeLine = "[STARTED] Runtime: setup handled start/autostart"
+        }
+        $telegramLine = "[VERIFY] Telegram: run spark verify --onboarding"
+    }
+    Write-Host ""
+    Write-Host "Install outcome:"
+    Write-Host "  [OK] CLI upgrade: complete"
+    Write-Host "  $setupLine"
+    Write-Host "  $runtimeLine"
+    Write-Host "  $telegramLine"
 }
 
 function Invoke-Install {
@@ -779,6 +831,7 @@ function Invoke-Install {
     Write-Host ""
     Write-Host "Install log:"
     Write-Host "  $Script:InstallLogPath"
+    Show-InstallOutcome
     Write-Host ""
     if ($SkipSetup) {
         Write-Host "Setup was skipped."
