@@ -5788,6 +5788,19 @@ def run_browser_use_command(cli_path: str, *parts: str, timeout: int = 45) -> su
     )
 
 
+def write_browser_use_screenshot(result: subprocess.CompletedProcess[str], screenshot_path: Path) -> None:
+    try:
+        parsed = json.loads(result.stdout.strip())
+        data = parsed.get("data") if isinstance(parsed, dict) else {}
+        encoded = str(data.get("screenshot") or "") if isinstance(data, dict) else ""
+        if not encoded:
+            raise ValueError("missing screenshot data")
+        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_path.write_bytes(base64.b64decode(encoded, validate=True))
+    except (ValueError, json.JSONDecodeError, base64.binascii.Error) as exc:
+        raise RuntimeError(f"browser-use screenshot response could not be saved: {exc}") from exc
+
+
 def browser_use_probe_payload() -> dict[str, Any]:
     cli_path = browser_use_cli_path()
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -5821,7 +5834,8 @@ def browser_use_probe_payload() -> dict[str, Any]:
         proofs.append("public_page_open")
         run_browser_use_command(cli_path, "--session", BROWSER_USE_PROBE_SESSION, "state", timeout=45)
         proofs.append("state_read")
-        run_browser_use_command(cli_path, "--session", BROWSER_USE_PROBE_SESSION, "screenshot", str(screenshot_path), timeout=60)
+        screenshot = run_browser_use_command(cli_path, "--json", "--session", BROWSER_USE_PROBE_SESSION, "screenshot", timeout=60)
+        write_browser_use_screenshot(screenshot, screenshot_path)
         proofs.append("screenshot_capture")
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         failure = browser_use_command_failure_message(exc)
@@ -5921,8 +5935,8 @@ def browser_use_action_payload(raw_url: str, *, screenshot: bool = False) -> dic
         proofs.append("state_read")
         page = browser_use_page_summary(cli_path, session)
         if screenshot:
-            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-            run_browser_use_command(cli_path, "--session", session, "screenshot", str(screenshot_path), timeout=60)
+            result = run_browser_use_command(cli_path, "--json", "--session", session, "screenshot", timeout=60)
+            write_browser_use_screenshot(result, screenshot_path)
             proofs.append("screenshot_capture")
         payload = {
             **base_payload,
