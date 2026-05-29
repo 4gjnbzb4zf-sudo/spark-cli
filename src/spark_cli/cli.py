@@ -5619,10 +5619,16 @@ def browser_use_cli_path() -> str | None:
     if discovered:
         return discovered
     executable_dir = Path(sys.executable).resolve().parent
+    candidate_dirs = [executable_dir]
+    spark_home = os.environ.get("SPARK_HOME")
+    if spark_home:
+        venv_root = Path(spark_home).expanduser() / "tools" / "spark-cli-venv"
+        candidate_dirs.extend([venv_root / "bin", venv_root / "Scripts"])
     for name in ("browser-use.exe", "browser_use.exe", "browser-use", "browser_use"):
-        candidate = executable_dir / name
-        if candidate.exists():
-            return str(candidate)
+        for directory in candidate_dirs:
+            candidate = directory / name
+            if candidate.exists():
+                return str(candidate)
     return None
 
 
