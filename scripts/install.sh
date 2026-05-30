@@ -222,6 +222,14 @@ fi
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
+    case "$(uname -s 2>/dev/null)" in
+      Linux)
+        echo "  Install on Linux: sudo apt install $1   (Debian/Ubuntu) or sudo dnf install $1   (Fedora/RHEL)" >&2 ;;
+      Darwin)
+        echo "  Install on macOS: brew install $1   (or use Xcode Command Line Tools for git: xcode-select --install)" >&2 ;;
+      *)
+        echo "  Install '$1' using your system package manager, then re-run this script." >&2 ;;
+    esac
     exit 1
   fi
 }

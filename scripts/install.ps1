@@ -95,7 +95,13 @@ function Resolve-FullPath {
 function Require-Command {
     param([string]$Name)
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "Missing required command: $Name"
+        $installHint = switch ($Name) {
+            "git"    { "Install with: winget install --id Git.Git -e   (or download from https://git-scm.com/download/win)" }
+            "curl"   { "curl ships with Windows 10+; on older systems install with: winget install --id cURL.cURL -e" }
+            "tar"    { "tar ships with Windows 10+; on older systems install from https://gnuwin32.sourceforge.net/packages/gtar.htm" }
+            default  { "Install '$Name' using winget (winget install $Name), then re-run this script." }
+        }
+        throw "Missing required command: $Name`n  $installHint"
     }
 }
 
